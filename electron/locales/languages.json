@@ -1,0 +1,8 @@
+[
+  { "id": "en", "name": "English", "nsis": 1033 },
+  { "id": "it", "name": "Italiano", "nsis": 1040 },
+  { "id": "es", "name": "Español", "nsis": 3082 },
+  { "id": "ja", "name": "日本語", "nsis": 1041 },
+  { "id": "zh-CN", "name": "简体中文", "nsis": 2052 },
+  { "id": "zh-TW", "name": "繁體中文", "nsis": 1028 }
+]

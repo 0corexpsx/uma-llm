@@ -1,0 +1,21 @@
+node_modules/
+dist/
+release/
+.testdata/
+.shots/
+*.gguf
+*.part
+*.log
+.env
+.env.local
+.DS_Store
+Thumbs.db
+
+# Built from "Advance Skills  Pack from Genesys Lab" by scripts/make_skill_library.cjs
+build/skill-library/
+build/skill-library.asar
+.testdata/
+__pycache__/
+
+# The Advance Skills Pack source: build/skill-library.asar is built from it
+Advance Skills  Pack from Genesys Lab/

@@ -1,0 +1,72 @@
+{
+  "appId": "com.ocorex.uma",
+  "productName": "Uma LLM",
+  "directories": {
+    "output": "release"
+  },
+  "files": [
+    "electron/**/*",
+    "dist/**/*",
+    "package.json",
+    "build/icon.png",
+    "!node_modules/**/*",
+    "node_modules/unpdf/package.json",
+    "node_modules/unpdf/dist/**/*",
+    "!node_modules/unpdf/dist/types/**/*"
+  ],
+  "win": {
+    "target": "nsis",
+    "icon": "build/icon.ico"
+  },
+  "nsis": {
+    "guid": "990d8456-53e3-5c6f-b90e-d6af3cc28aaf",
+    "oneClick": false,
+    "perMachine": false,
+    "allowToChangeInstallationDirectory": true,
+    "artifactName": "Uma-LLM-Setup-${version}.${ext}",
+    "shortcutName": "Uma LLM",
+    "multiLanguageInstaller": true,
+    "installerLanguages": [
+      "en_US",
+      "it_IT",
+      "es_ES",
+      "ja_JP",
+      "zh_CN",
+      "zh_TW"
+    ],
+    "displayLanguageSelector": true,
+    "include": "build/installer.nsh",
+    "license": "LICENSE.txt"
+  },
+  "mac": {
+    "target": [
+      {
+        "target": "zip",
+        "arch": [
+          "arm64",
+          "x64"
+        ]
+      }
+    ],
+    "icon": "build/icon.icns",
+    "category": "public.app-category.developer-tools",
+    "artifactName": "Uma-LLM-${version}-mac-${arch}.${ext}",
+    "identity": null,
+    "hardenedRuntime": false
+  },
+  "extraResources": [
+    {
+      "from": "build/skill-library.asar",
+      "to": "skill-library.asar"
+    },
+    {
+      "from": "LICENSE.txt",
+      "to": "LICENSE.txt"
+    },
+    {
+      "from": "THIRD-PARTY-NOTICES.txt",
+      "to": "THIRD-PARTY-NOTICES.txt"
+    }
+  ],
+  "copyright": "Copyright (C) 2026 Ocorex. Free software under the GNU GPL v3."
+}

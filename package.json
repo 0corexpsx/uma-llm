@@ -1,0 +1,42 @@
+{
+  "name": "uma-llm",
+  "productName": "Uma LLM",
+  "version": "0.2.85",
+  "description": "Uma LLM: a private AI assistant that runs local models on your own PC.",
+  "desktopName": "uma-llm.desktop",
+  "main": "electron/main.cjs",
+  "license": "GPL-3.0-or-later",
+  "author": "Ocorex",
+  "homepage": "https://www.0corexpsx.com/uma",
+  "scripts": {
+    "start": "vite build && electron .",
+    "dev": "node scripts/dev.cjs",
+    "build": "vite build",
+    "test": "node scripts/test-security.cjs && node scripts/test-agent.cjs && node scripts/test-review.cjs && node scripts/test-recovery.cjs && node scripts/test-download-pause.cjs && node scripts/i18n-check.cjs",
+    "skills:library": "node scripts/make_skill_library.cjs",
+    "package": "electron-builder --config .electron-builder.json",
+    "pack": "vite build && electron-builder --config .electron-builder.json --dir",
+    "dist": "vite build && electron-builder --config .electron-builder.json",
+    "postinstall": "node node_modules/electron/install.js"
+  },
+  "dependencies": {
+    "@fontsource-variable/fraunces": "^5.2.8",
+    "@fontsource-variable/manrope": "^5.2.8",
+    "highlight.js": "^11.11.1",
+    "lucide-react": "^0.544.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "react-markdown": "^10.1.0",
+    "rehype-highlight": "^7.0.2",
+    "remark-gfm": "^4.0.1",
+    "unpdf": "^2.1.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^45.1.0",
+    "electron-builder": "^26.18.0",
+    "vite": "^7.3.7"
+  },
+  "private": true,
+  "funding": "https://ko-fi.com/0corexpsx"
+}

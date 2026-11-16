@@ -1,0 +1,283 @@
+/*
+ * Uma LLM's look: Windows 7 Aero, in deep blue glass (like Windows Media Center on Windows 7).
+ * Loaded after styles.css and collab.css; every rule is under :root[data-skin='aero'], which
+ * main.jsx sets at start, so this file wins over the rules it changes. There is one look only:
+ * no light or dark mode.
+ */
+
+/* ───────────── shared: type, buttons, inputs, selection, scrollbars ───────────── */
+:root[data-skin='aero'] {
+  --font-sans: 'Segoe UI', Tahoma, sans-serif;
+  --font-display: 'Segoe UI', Tahoma, sans-serif;
+  --radius: 4px;
+}
+:root[data-skin='aero'] body,
+:root[data-skin='aero'] .app { font-family: 'Segoe UI', Tahoma, sans-serif; letter-spacing: 0; }
+:root[data-skin='aero'] .view-header h2,
+:root[data-skin='aero'] .sidebar-head h3,
+:root[data-skin='aero'] .inspector-head h3,
+:root[data-skin='aero'] .settings-section-head h3,
+:root[data-skin='aero'] .chat-empty h1,
+:root[data-skin='aero'] .boot-screen h1 { font-family: 'Segoe UI', Tahoma, sans-serif; font-weight: 400; letter-spacing: 0; }
+
+/* Win7 push button: two-tone glossy gradient, 3px corners */
+:root[data-skin='aero'] .btn,
+:root[data-skin='aero'] .icon-btn,
+:root[data-skin='aero'] .model-pill,
+:root[data-skin='aero'] .context-chip,
+:root[data-skin='aero'] .new-thread-btn,
+:root[data-skin='aero'] .boot-retry {
+  border-radius: 3px !important;
+  font-weight: 400;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.75) !important;
+}
+:root[data-skin='aero'] .btn-secondary,
+:root[data-skin='aero'] .btn-ghost,
+:root[data-skin='aero'] .icon-btn,
+:root[data-skin='aero'] .model-pill,
+:root[data-skin='aero'] .context-chip,
+:root[data-skin='aero'] .new-thread-btn {
+  background: linear-gradient(#f2f2f2 0%, #ebebeb 49%, #dddddd 50%, #cfcfcf 100%) !important;
+  border: 1px solid #707070 !important;
+  color: #000 !important;
+}
+:root[data-skin='aero'] .btn-secondary:hover:not(:disabled),
+:root[data-skin='aero'] .btn-ghost:hover:not(:disabled),
+:root[data-skin='aero'] .icon-btn:hover,
+:root[data-skin='aero'] .model-pill:hover,
+:root[data-skin='aero'] .context-chip:hover,
+:root[data-skin='aero'] .new-thread-btn:hover {
+  background: linear-gradient(#eaf6fd 0%, #d9f0fc 49%, #bee6fd 50%, #a7d9f5 100%) !important;
+  border-color: #3c7fb1 !important;
+}
+:root[data-skin='aero'] .btn-primary,
+:root[data-skin='aero'] .send-btn {
+  background: linear-gradient(#6fb6ee 0%, #3d8fd8 49%, #2a76c6 50%, #3a8ddb 100%) !important;
+  border: 1px solid #1d5694 !important;
+  color: #fff !important;
+  text-shadow: 0 -1px 0 rgba(0, 0, 0, 0.25);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.35), 0 0 4px rgba(51, 153, 255, 0.45) !important;
+  border-radius: 3px !important;
+}
+:root[data-skin='aero'] .btn-primary:hover:not(:disabled),
+:root[data-skin='aero'] .send-btn:hover:not(:disabled) {
+  background: linear-gradient(#8cc8f4 0%, #56a3e3 49%, #3a86d3 50%, #4b9ee6 100%) !important;
+}
+:root[data-skin='aero'] .btn-danger { background: linear-gradient(#f8d4cf, #e9a59c 50%, #dc7c70 51%, #e58d82) !important; border: 1px solid #a3352a !important; color: #3d0b06 !important; }
+
+/* text boxes and drop-downs */
+:root[data-skin='aero'] .input,
+:root[data-skin='aero'] .select,
+:root[data-skin='aero'] .sidebar-search,
+:root[data-skin='aero'] .composer {
+  border-radius: 2px !important;
+  border: 1px solid #abadb3 !important;
+  border-top-color: #8f9195 !important;
+}
+:root[data-skin='aero'] .composer:focus-within,
+:root[data-skin='aero'] .input:focus,
+:root[data-skin='aero'] .select:focus,
+:root[data-skin='aero'] .sidebar-search:focus-within { border-color: #3d7bad !important; box-shadow: 0 0 0 1px rgba(61, 123, 173, 0.25) !important; }
+
+/* Explorer-style hover and selection */
+:root[data-skin='aero'] .thread-item,
+:root[data-skin='aero'] .rail-item,
+:root[data-skin='aero'] .dropdown-item,
+:root[data-skin='aero'] .settings-nav-item { border-radius: 3px !important; border: 1px solid transparent; }
+:root[data-skin='aero'] .rail-item.is-active::before { display: none; }
+
+/* scrollbars, Windows 7 style */
+:root[data-skin='aero'] ::-webkit-scrollbar { width: 17px; height: 17px; }
+:root[data-skin='aero'] ::-webkit-scrollbar-track { background: linear-gradient(90deg, #e3e3e3, #f4f4f4 40%, #f4f4f4 60%, #e3e3e3); }
+:root[data-skin='aero'] ::-webkit-scrollbar-thumb {
+  background: linear-gradient(90deg, #f6f6f6, #e6e6e6 50%, #d6d6d6 51%, #e4e4e4);
+  border: 1px solid #9a9a9a;
+  border-radius: 3px;
+}
+:root[data-skin='aero'] ::-webkit-scrollbar-thumb:hover { background: linear-gradient(90deg, #e9f6fd, #d0ecfc 50%, #b7e1fb 51%, #c9e9fc); border-color: #3c7fb1; }
+
+/* window buttons: glass min/max, red close */
+:root[data-skin='aero'] .window-controls { gap: 0; padding: 0 6px 0 0; align-items: flex-start; }
+:root[data-skin='aero'] .window-controls button {
+  height: 20px; width: 28px; margin-top: 0;
+  background: linear-gradient(rgba(255, 255, 255, 0.55), rgba(255, 255, 255, 0.15) 50%, rgba(255, 255, 255, 0.05) 51%, rgba(255, 255, 255, 0.3));
+  border: 1px solid rgba(40, 60, 90, 0.55);
+  border-top: 0;
+  color: #fff;
+  filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.5));
+}
+:root[data-skin='aero'] .window-controls button:first-child { border-radius: 0 0 0 5px; }
+:root[data-skin='aero'] .window-controls .window-close {
+  width: 46px;
+  border-radius: 0 0 5px 0;
+  background: linear-gradient(#e8a497 0%, #d9796a 49%, #c75050 50%, #d46b5d 100%);
+  border-color: #6d1f17;
+}
+:root[data-skin='aero'] .window-controls button:hover { background: linear-gradient(#d0eafd, #a3d2f5 50%, #7fbaeb 51%, #a6d4f4); }
+:root[data-skin='aero'] .window-controls .window-close:hover { background: linear-gradient(#f4b9ad, #eb8b79 50%, #e0503a 51%, #ec7a63) !important; }
+
+/* ───────────── colours: deep blue glass ───────────── */
+:root[data-skin='aero'] {
+  color-scheme: dark;
+  --surface-0: #0a2147;
+  --surface-1: #0c2a57;
+  --surface-2: #0f3266;
+  --surface-3: #133c78;
+  --surface-4: #1a4a8c;
+  --surface-5: #2259a3;
+  --fg-rgb: 235, 244, 255;
+  --text: #ffffff;
+  --text-soft: #dbe8f8;
+  --muted: #a9c1df;
+  --faint: #7f9bc0;
+  --accent-rgb: 102, 204, 255;
+  --accent-deep-rgb: 51, 153, 255;
+  --ember: #5cc6ff;
+  --ember-2: #8bd8ff;
+  --ember-deep: #2a9ae8;
+  --on-accent: #ffffff;
+  --bg-rgb: 10, 33, 71;
+  --line: rgba(160, 200, 255, 0.18);
+  --line-strong: rgba(160, 200, 255, 0.32);
+}
+:root[data-skin='aero'] .app,
+:root[data-skin='aero'] .main-panel,
+:root[data-skin='aero'] .chat-panel {
+  background:
+    radial-gradient(ellipse 80% 55% at 50% 0%, rgba(70, 150, 230, 0.35), transparent 70%),
+    linear-gradient(#0d3a78 0%, #0a2650 55%, #071a3a 100%) !important;
+}
+:root[data-skin='aero'] .titlebar {
+  background:
+    linear-gradient(rgba(255, 255, 255, 0.22), rgba(255, 255, 255, 0.04) 45%, rgba(255, 255, 255, 0) 60%),
+    linear-gradient(100deg, #1d4f8f, #2a64a8 40%, #1c4a86);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.5);
+}
+:root[data-skin='aero'] .rail,
+:root[data-skin='aero'] .sidebar,
+:root[data-skin='aero'] .inspector {
+  background: linear-gradient(rgba(255, 255, 255, 0.10), rgba(255, 255, 255, 0.03)) !important;
+  border-color: rgba(160, 200, 255, 0.22) !important;
+  backdrop-filter: blur(6px);
+}
+:root[data-skin='aero'] .rail-item.is-active,
+:root[data-skin='aero'] .thread-item.is-active,
+:root[data-skin='aero'] .dropdown-item.is-active {
+  background: linear-gradient(rgba(130, 200, 255, 0.45), rgba(60, 140, 230, 0.35)) !important;
+  border-color: rgba(170, 220, 255, 0.7);
+  box-shadow: 0 0 8px rgba(90, 180, 255, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.4);
+  color: #fff;
+}
+:root[data-skin='aero'] .thread-item:hover,
+:root[data-skin='aero'] .rail-item:hover { background: linear-gradient(rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0.05)); border-color: rgba(170, 220, 255, 0.4); }
+:root[data-skin='aero'] .view-header {
+  background: linear-gradient(rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.04) 50%, rgba(0, 0, 0, 0.08) 51%, rgba(0, 0, 0, 0.02)) !important;
+  border-bottom: 1px solid rgba(160, 200, 255, 0.25);
+}
+:root[data-skin='aero'] .settings-card,
+:root[data-skin='aero'] .inspector-card,
+:root[data-skin='aero'] .scope-card,
+:root[data-skin='aero'] .status-tile,
+:root[data-skin='aero'] .status-table,
+:root[data-skin='aero'] .status-model,
+:root[data-skin='aero'] .composer {
+  background: linear-gradient(rgba(255, 255, 255, 0.10), rgba(255, 255, 255, 0.04)) !important;
+  border: 1px solid rgba(160, 200, 255, 0.28) !important;
+  border-radius: 4px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.15);
+}
+:root[data-skin='aero'] .user-text { background: linear-gradient(rgba(120, 190, 255, 0.30), rgba(60, 130, 220, 0.22)); border: 1px solid rgba(170, 220, 255, 0.45); }
+:root[data-skin='aero'] .input,
+:root[data-skin='aero'] .select,
+:root[data-skin='aero'] .sidebar-search { background-color: rgba(4, 18, 42, 0.55) !important; border-color: rgba(160, 200, 255, 0.4) !important; color: #fff; }
+/* glossy buttons on dark glass */
+:root[data-skin='aero'] .btn-secondary,
+:root[data-skin='aero'] .btn-ghost,
+:root[data-skin='aero'] .icon-btn,
+:root[data-skin='aero'] .model-pill,
+:root[data-skin='aero'] .context-chip,
+:root[data-skin='aero'] .new-thread-btn {
+  background: linear-gradient(rgba(255, 255, 255, 0.30) 0%, rgba(255, 255, 255, 0.12) 49%, rgba(255, 255, 255, 0.04) 50%, rgba(255, 255, 255, 0.14) 100%) !important;
+  border: 1px solid rgba(170, 215, 255, 0.55) !important;
+  color: #fff !important;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12) !important;
+}
+:root[data-skin='aero'] .btn-secondary:hover:not(:disabled),
+:root[data-skin='aero'] .icon-btn:hover,
+:root[data-skin='aero'] .model-pill:hover,
+:root[data-skin='aero'] .context-chip:hover {
+  background: linear-gradient(rgba(140, 210, 255, 0.55), rgba(80, 160, 240, 0.35) 49%, rgba(40, 120, 220, 0.3) 50%, rgba(90, 170, 245, 0.45)) !important;
+  box-shadow: 0 0 8px rgba(110, 190, 255, 0.6) !important;
+}
+:root[data-skin='aero'] ::-webkit-scrollbar-track { background: rgba(0, 0, 0, 0.25); }
+:root[data-skin='aero'] ::-webkit-scrollbar-thumb { background: linear-gradient(90deg, rgba(255,255,255,.35), rgba(255,255,255,.15) 50%, rgba(255,255,255,.08) 51%, rgba(255,255,255,.2)); border-color: rgba(170, 215, 255, 0.5); }
+
+/* on/off switches: a glass track that lights up blue when on */
+:root[data-skin='aero'] .toggle {
+  border-radius: 3px;
+  background: linear-gradient(rgba(0, 0, 0, 0.35), rgba(255, 255, 255, 0.06));
+  border: 1px solid rgba(170, 215, 255, 0.45);
+}
+:root[data-skin='aero'] .toggle-knob {
+  border-radius: 2px;
+  background: linear-gradient(#ffffff 0%, #e8eef6 49%, #c9d6e6 50%, #e3ebf5 100%);
+  box-shadow: 0 0 0 1px rgba(20, 50, 90, 0.6);
+}
+:root[data-skin='aero'] .toggle.is-on {
+  background: linear-gradient(#6fb6ee 0%, #3d8fd8 49%, #2a76c6 50%, #3a8ddb 100%);
+  border-color: #8fd0ff;
+  box-shadow: 0 0 6px rgba(90, 180, 255, 0.55);
+}
+:root[data-skin='aero'] .toggle.is-on .toggle-knob { background: linear-gradient(#ffffff 0%, #eef4fb 49%, #d6e3f2 50%, #eef4fb 100%); }
+
+/* start screen and licence window on the blue glass */
+:root[data-skin='aero'] .boot-screen,
+:root[data-skin='aero'] .terms-view {
+  background:
+    radial-gradient(ellipse 80% 55% at 50% 0%, rgba(70, 150, 230, 0.35), transparent 70%),
+    linear-gradient(#0d3a78 0%, #0a2650 55%, #071a3a 100%) !important;
+}
+:root[data-skin='aero'] .terms-text {
+  background: linear-gradient(rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.03)) !important;
+  border: 1px solid rgba(160, 200, 255, 0.28) !important;
+  border-radius: 4px;
+}
+:root[data-skin='aero'] .terms-head { border-bottom-color: rgba(160, 200, 255, 0.25); }
+
+/* drop-down arrow, light on the blue glass */
+:root[data-skin='aero'] .select {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='none' stroke='%23cfe6ff' stroke-width='1.6'%3E%3Cpath d='m3 4.5 3 3 3-3'/%3E%3C/svg%3E") !important;
+  background-repeat: no-repeat !important;
+  background-position: right 10px center !important;
+  padding-right: 30px;
+}
+
+/* every heading in Segoe UI as Windows 7 drew it: the big ones light, the small ones normal */
+:root[data-skin='aero'] .app h1,
+:root[data-skin='aero'] .app h2,
+:root[data-skin='aero'] .app h3,
+:root[data-skin='aero'] .about-copy strong {
+  font-family: 'Segoe UI', Tahoma, sans-serif !important;
+  letter-spacing: 0 !important;
+  font-weight: 400 !important;
+}
+:root[data-skin='aero'] .model-hero h1,
+:root[data-skin='aero'] .bench-hero h1,
+:root[data-skin='aero'] .overview-hero h1,
+:root[data-skin='aero'] .bench-result-head h1,
+:root[data-skin='aero'] .chat-empty h1 {
+  font-family: 'Segoe UI Light', 'Segoe UI', Tahoma, sans-serif !important;
+  font-weight: 300 !important;
+}
+:root[data-skin='aero'] .bench-hero h1 em { font-style: normal; color: var(--ember-2); }
+
+/* the start window on the blue glass */
+:root[data-skin='aero'] .start-view {
+  background:
+    radial-gradient(ellipse 90% 45% at 50% 0%, rgba(70, 150, 230, 0.35), transparent 70%),
+    linear-gradient(#0d3a78 0%, #0a2650 55%, #071a3a 100%);
+}
+:root[data-skin='aero'] .start-ada {
+  background: linear-gradient(rgba(255, 255, 255, 0.10), rgba(255, 255, 255, 0.04));
+  border-color: rgba(160, 200, 255, 0.3);
+}
