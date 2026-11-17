@@ -1,31 +1,29 @@
 # Uma LLM
 
-**A private AI assistant that runs local models on your own PC.**
+**A private AI assistant that runs open-weight models directly on your PC.**
 
-Free and open source (GNU GPL v3), made by Ocorex. If Uma helps you, you can [buy me a coffee on Ko-fi](https://ko-fi.com/0corexpsx).
+**Built by 0corexpsx. Supercharged by Genesys Labs Studios.** Free and open source (GNU GPL v3). If Uma helps you, you can [buy me a coffee on Ko-fi](https://ko-fi.com/0corexpsx). Website: [0corexpsx.com](https://www.0corexpsx.com/)
 
-Uma downloads an open-weight model, installs its own llama.cpp engine, and runs everything on your machine. It can read and change files in one working folder you choose, run commands when you allow it, and look at screenshots and documents you attach. There is no account, no cloud service, and no setup wizard.
+No account, no cloud, no subscription. Uma downloads an open-weight model, installs its own llama.cpp engine and runs everything on your own hardware. It works inside the folder you choose, or across the whole PC when you allow it, and it can share the work of one model across several PCs on your network.
 
 <p align="center">
-  <img src="docs/screenshots/chat-dark.png" alt="Uma LLM chat in the dark theme" width="920" />
+  <img src="docs/screenshots/chat.png" alt="Uma LLM on a new conversation: four quick actions, the threads on the left, the working folder and the active model on the right" width="920" />
 </p>
 
-| Light theme | Model settings |
+| Models: one click from Hugging Face | Benchmark: how fast your local AI really is |
 | --- | --- |
-| ![Chat in the light theme](docs/screenshots/chat-light.png) | ![Model settings with the memory estimate](docs/screenshots/model-settings.png) |
-
-| Models | Settings |
-| --- | --- |
-| ![Models](docs/screenshots/models-light.png) | ![Settings with the theme choice](docs/screenshots/settings-light.png) |
+| ![The Models page: the active model, the models on this PC and models recommended for your hardware](docs/screenshots/models.png) | ![The Benchmark page: 42.7 tokens per second with prompt speed, first-token latency and total run time](docs/screenshots/benchmark.png) |
 
 ## What it does
 
-- **Chat with a local model**: replies stream from a llama.cpp server on `127.0.0.1`, started on demand.
-- **Work in a folder**: the agent can list, read, write, edit, move, search, and delete-to-Recycle-Bin inside one working folder. Every action shows as a card in the chat, and file changes can be undone.
+- **Chat with a local model**: replies stream from a llama.cpp server on `127.0.0.1`, started on demand. Threads are saved on your PC and fully searchable.
+- **Work in a folder**: map the workspace, write a README, find loose ends or tidy a folder. The agent can list, read, write, edit, move, search, and delete-to-Recycle-Bin inside the working folder; every action shows as a card in the chat, and file changes can be undone.
+- **One-click Hugging Face downloads**: models recommended for your GPU, VRAM and RAM, optimized quantizations for speed and uncensored (abliterated) variants, plus live search, **Import GGUF** and **Add from URL**.
+- **PC helpers**: other PCs on your network lend Uma their RAM, VRAM, CPU and GPU, so a main PC with limited memory can run large models smoothly (see [PC helpers](#pc-helpers)).
+- **AI Skills Pack by Genesys Labs**: **6,236 skills** in six categories, loaded only when a task needs them, plus 13 starter skills and your own (see [Skills](#skills)).
+- **Benchmark and Status**: measure generation speed, prompt speed and first-token latency, and watch every PC in your setup live.
 - **Attach files**: screenshots, PDFs, Word documents, and text files, by button, drag and drop, or paste.
-- **Download any GGUF model**: a built-in list, plus live search of Hugging Face with a memory estimate for each version.
 - **Per-model settings**: context length, GPU offload, cache types, sampling, and more.
-- **Skills**: the **AI Skills Pack by Genesys Labs** with **6,236 skills** in six categories, 13 starter skills for common tasks, and your own.
 - **Light and dark themes**, and CPU, RAM, GPU, and VRAM readings in the title bar.
 - **Hard boundaries**: paths outside the working folder are refused by the app, not just by the prompt. Full PC access, terminal, deleting, and internet are each a separate switch.
 
@@ -118,8 +116,6 @@ The folder is not locked when a conversation starts. Use the **scope pill in the
 - Switch between **Workspace only** and **Whole PC**.
 - Return to the workspace boundary without restarting.
 
-![Access scope selector](docs/screenshots/access-menu.png)
-
 Changing the folder updates the workspace immediately for the next message. If a response is currently streaming, stop it first.
 
 ## Full PC access (optional, off by default)
@@ -127,8 +123,6 @@ Changing the folder updates the workspace immediately for the next message. If a
 Uma normally gives the agent one folder and rejects absolute paths, `..` escapes, and symlinks that leave it.
 
 If you genuinely want an agent that can work on the rest of the PC, go to **Settings → Agent permissions → Full PC access**. Uma shows a warning dialog explaining that this removes the folder boundary, requires you to tick an explicit responsibility checkbox, and only then enables it. The title bar and chat show a persistent **FULL PC** warning while it is on.
-
-![Full PC access warning](docs/screenshots/full-pc-warning.png)
 
 What changes when it is on:
 
@@ -155,8 +149,6 @@ Local models make mistakes and web pages can try to trick them: stay at the PC w
 ## Internet access (optional, off by default)
 
 Enable **Settings → Agent permissions → Internet access**, or use the scope menu in chat → **Enable internet access…**. A separate consent dialog explains that search queries leave the PC and that web pages are untrusted.
-
-![Internet access warning](docs/screenshots/internet-warning.png)
 
 When enabled, the model gets two tools:
 
@@ -272,6 +264,24 @@ Measured on an RTX 2070 (8 GB) with all layers on the GPU, generating 256 tokens
 | Bonsai 27B | 18.5 tok/s | 27 tok/s | 51 tok/s | 131 tok/s |
 
 To measure your own machine: `node scripts/compare-engines.cjs qwen3-8b --no-install`. Uma must be closed, because a loaded model skews the result, and the script leaves CUDA active if it is installed.
+
+## PC helpers
+
+<p align="center">
+  <img src="docs/screenshots/pc-helpers.png" alt="The Uma horse holding a stick of RAM, linked to six PCs, next to the command uma --share and the words: share the UMA power!" width="820" />
+</p>
+
+Uma distributes the work of a model across multiple PCs. A model is made of layers: the main PC keeps as many as its own memory can hold, and the remaining layers run on helper PCs on your local network. Each PC computes its share and passes the result on, so the answer is produced as if a single, far more powerful machine were doing the work. A main PC with limited VRAM and RAM can therefore run large, demanding models smoothly, drawing on the memory and graphics cards of the other computers.
+
+1. On the second PC, start Uma in helper mode: `uma --share`.
+2. Uma on your main PC detects the helper on the local network and shows the resources it provides: RAM, VRAM, CPU and GPU.
+3. Uma distributes the model across your PC and its helpers. You work exactly as before, with more compute behind every answer.
+
+- **Memory adds up**: in the screenshot below, an 8 GB graphics card and a 12 GB helper work together as one 20 GB system.
+- **Status page**: shows live which PCs are online, how much memory each one contributes, the data exchanged and any problem that needs attention. Add, test or turn off helper PCs from **Helper PCs**.
+- **Privacy**: your chats and files stay on the main PC; helpers only provide memory and compute.
+
+![The Server status page: two PCs online with 20 GB of graphics memory in total, the loaded model, and the CPU, RAM, GPU, VRAM and data of each PC](docs/screenshots/status.png)
 
 ## Benchmark tab
 
