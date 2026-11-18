@@ -268,7 +268,7 @@ To measure your own machine: `node scripts/compare-engines.cjs qwen3-8b --no-ins
 ## PC helpers
 
 <p align="center">
-  <img src="docs/screenshots/pc-helpers.png" alt="The Uma horse holding a stick of RAM, linked to six PCs, next to the command uma --share and the words: share the UMA power!" width="820" />
+  <img src="docs/screenshots/pc-helpers.png" alt="The Uma horse holding a stick of RAM and a network cable, linked to six PCs, next to the command uma --share and the words: share the UMA power!" width="820" />
 </p>
 
 Uma distributes the work of a model across multiple PCs. A model is made of layers: the main PC keeps as many as its own memory can hold, and the remaining layers run on helper PCs on your local network. Each PC computes its share and passes the result on, so the answer is produced as if a single, far more powerful machine were doing the work. A main PC with limited VRAM and RAM can therefore run large, demanding models smoothly, drawing on the memory and graphics cards of the other computers.
@@ -277,11 +277,11 @@ Uma distributes the work of a model across multiple PCs. A model is made of laye
 2. Uma on your main PC detects the helper on the local network and shows the resources it provides: RAM, VRAM, CPU and GPU.
 3. Uma distributes the model across your PC and its helpers. You work exactly as before, with more compute behind every answer.
 
-- **Memory adds up**: in the screenshot below, an 8 GB graphics card and a 12 GB helper work together as one 20 GB system.
+- **Memory adds up**: for example, an 8 GB graphics card and a 12 GB helper work together as one 20 GB system.
 - **Status page**: shows live which PCs are online, how much memory each one contributes, the data exchanged and any problem that needs attention. Add, test or turn off helper PCs from **Helper PCs**.
 - **Privacy**: your chats and files stay on the main PC; helpers only provide memory and compute.
 
-![The Server status page: two PCs online with 20 GB of graphics memory in total, the loaded model, and the CPU, RAM, GPU, VRAM and data of each PC](docs/screenshots/status.png)
+![The Server status page: what the lights mean, the PCs online, graphics memory, data exchanged and problems, the loaded model, and the table that reads every PC every two seconds](docs/screenshots/status.png)
 
 ## Benchmark tab
 
