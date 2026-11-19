@@ -23,6 +23,7 @@ No account, no cloud, no subscription. Uma downloads an open-weight model, insta
 - **AI Skills Pack by Genesys Labs**: **6,236 skills** in six categories, loaded only when a task needs them, plus 13 starter skills and your own (see [Skills](#skills)).
 - **Benchmark and Status**: measure generation speed, prompt speed and first-token latency, and watch every PC in your setup live.
 - **Attach files**: screenshots, PDFs, Word documents, and text files, by button, drag and drop, or paste.
+- **Make PDF and Word documents**: "make a PDF about…" or "save this as report.docx" gives a real `.pdf` or `.docx` file in the working folder. Uma makes them itself: no Word, no PDF program, no download (see [Making documents](#making-documents)).
 - **Per-model settings**: context length, GPU offload, cache types, sampling, and more.
 - **Light and dark themes**, and CPU, RAM, GPU, and VRAM readings in the title bar.
 - **Hard boundaries**: paths outside the working folder are refused by the app, not just by the prompt. Full PC access, terminal, deleting, and internet are each a separate switch.
@@ -140,6 +141,8 @@ What it means: a local model can be influenced by the files and prompts it reads
 **Settings → Agent permissions → Control the mouse and keyboard** lets the AI act in other programs on your real screen: bring a window to the front, click, double-click, scroll, drag, type and press keys — for example "open Brave, find a lofi music video on YouTube and play it". It asks for confirmation first.
 
 - **Clicking needs sight:** turn on "See the screen" and use a model that can see. The AI clicks at positions in the whole-screen picture it looks at, and Uma turns them into real screen positions (Windows scaling included). Without sight it can still use the keyboard.
+- **It sees what it did:** after every click, key press or wait, a small picture of the whole screen goes back to the model with the result, so it checks its own step without asking to look again (about half a second on an RTX 2070). To read something or to click by position it looks at full size. Before it may say that something is now open or playing, it still has to look and say what it sees.
+- **A closer look:** the whole screen is shown to the model 1,280 pixels wide, which blurs small text. It can ask for one part of the picture at full sharpness (`look_at_screen` with `"zoom":[left,top,right,bottom]`); a small part comes out about three times larger on a 1920×1080 screen.
 - **You see it act:** a blue notice stays in the bottom-right corner while it works, and every click and key press is a step in the chat.
 - **Stop it at any moment:** press **Ctrl+Alt+Esc**, or push the mouse into the **top-left corner** of the screen. It stays stopped until your next message.
 - **Platforms:** Windows uses its own input functions, with nothing to install. On a Mac, allow Uma LLM in System Settings → Privacy & Security → Accessibility. On Linux, install `xdotool`.
@@ -182,6 +185,17 @@ Use the paperclip in the chat box, drag files onto it, or paste a screenshot wit
 - **Documents:** text and code files, PDF, and Word `.docx`, up to 50 MB. Their text goes to the model and stays available for later messages in that conversation. A file too long for the context is cut to its start and end, with a visible warning. A scanned PDF has no text to read, so attach screenshots of its pages instead. Save spreadsheets as `.csv`, and presentations and older `.doc` files as PDF.
 - **Images:** the model needs a vision file (`mmproj`). **Search Hugging Face** downloads one with any version from a repository that has it. For a model you already have, use **Vision** in its settings. If the current model cannot see images, Uma says so and does not send. Images are scaled to at most 1568 pixels on the long side, and an image is sent with its own message only.
 
+## Making documents
+
+Ask for a PDF or a Word document and Uma makes the file itself, with the `save_document` tool (it needs **Allow file edits**, like every tool that writes; nothing is installed and the terminal is not used):
+
+- The model writes the text as Markdown, and Uma turns it into the document: headings, paragraphs, bold and italic, links, bulleted and numbered lists, tables, quotes and code.
+- **PDF** (`.pdf`): printed on A4 by the engine that draws Uma's own window. An HTML page of the project can be printed as it is (`{"path":"invoice.pdf","from":"invoice.html"}`).
+- **Word** (`.docx`): written directly, and opens in Word, LibreOffice, Pages and Google Docs.
+- A document longer than one reply is written to a `.md` file in parts first and made from that file; the `.md` stays beside it.
+
+Not made: pictures inside the document, page numbers and headers, `.doc`, Excel and PowerPoint files.
+
 ## Usage readings
 
 The title bar shows CPU, RAM, GPU, and VRAM, refreshed every 5 seconds. They are whole-PC numbers, not only Uma's. GPU and VRAM readings need an NVIDIA GPU, and are paused while the window is minimized.
@@ -222,6 +236,8 @@ Uma ships with the **AI Skills Pack by Genesys Labs**: **6,236 ready-made skills
 | Catalogs and Guides | 39 | Curated indexes and guides for agent skills and subagents |
 | Reverse Engineering | 18 | APK, binary, firmware, .NET, JavaScript and macOS analysis with Ghidra and IDA, for authorised testing only |
 | **Total** | **6,236** | |
+
+Of these, 992 work only through a connector of other assistants (an MCP server: 882 of them automate an online service through Rube/Composio). Uma has no connectors, so it never gives those skills to the model; they stay in the library, marked **Needs a connector**, to read or adapt. The model is offered the other 5,244. Asked to do something in one of those services ("post this in my Slack channel"), Uma says that it cannot reach it and offers a draft instead.
 
 ### Writing your own
 
@@ -264,6 +280,25 @@ Measured on an RTX 2070 (8 GB) with all layers on the GPU, generating 256 tokens
 | Bonsai 27B | 18.5 tok/s | 27 tok/s | 51 tok/s | 131 tok/s |
 
 To measure your own machine: `node scripts/compare-engines.cjs qwen3-8b --no-install`. Uma must be closed, because a loaded model skews the result, and the script leaves CUDA active if it is installed.
+
+### Several graphics cards in one PC
+
+A PC can hold more than one NVIDIA card, and they need not be alike (an RTX 3060 with two Tesla P40, say). Uma reads every card, adds their memory up for the model list and the memory estimate, and shows each card in the title bar (`GPU ×3  87 · 12 · 40%`; hover for each card's memory). The panel on the right of a chat adds a small graph per card: GPU use and memory in use over the last five minutes, with the reading under the pointer.
+
+When a model loads, Uma asks the engine which cards it can use and plans the split from that list:
+
+- **The model fits on the cards**: every layer goes to a card, shared in proportion to each card's free memory.
+- **It does not fit**: the cards are filled and the rest stays in RAM.
+- If a plan does not load, Uma tries the fill plan, then llama.cpp's own split.
+
+The plan is in the model panel on the right and in the log (`[uma] plan for 3 graphics cards …`). Layers on different cards run one after the other, so several cards add memory, not speed: a model that fits on one card is as fast there as on three.
+
+**A card that is not used.** If the engine does not list a card, nothing can run on it, and the model panel says *Not used by this engine*. The usual reasons:
+
+- **Tesla P40, GTX 10 and older cards need a CUDA 12 engine.** CUDA 13 has no code for them. Their last driver is the 580 series, with which Uma installs CUDA 12.4 by itself.
+- **Vulkan cannot see a card in compute-only (TCC) mode**, which is how Tesla cards run on Windows. Use the CUDA engine.
+
+This was tested with stand-ins for the cards (`scripts/test-review.cjs`), not on a PC with several cards.
 
 ## PC helpers
 
@@ -403,20 +438,49 @@ node scripts/test-agent.cjs
 # Agent scenarios on the models you already installed in the app (throwaway workspace)
 node scripts/e2e-agent.cjs qwen3-8b
 
+# Whole tasks in English, Italian and Chinese on an installed model (part of its name), each run
+# three times, side by side with the code of the last commit: did a change help or hurt?
+npm run test:model -- qwen3.8-9b --samples 3 --against HEAD
+
+# Only the terminal and internet tasks (real commands in a throwaway folder, real web searches),
+# or the whole list with those switches on, as someone who allowed everything has it
+npm run test:model -- qwen3.8-9b --only terminal,internet
+npm run test:model -- qwen3.8-9b --on terminal,internet,delete
+
+# Seeing, with a model that has a vision file: a page as a picture, and the screen (it is only looked at)
+npm run test:model -- qwen3.8-9b --screen --only screen
+
+# The tests that open the real app in hidden windows (Settings, the skill library, updates, the
+# start window…), one after the other; --all adds those that need a model, the network, or the mouse
+npm run test:ui
+
 # Real local model + real llama.cpp + real file write (downloads ~3 GB on first run)
 $env:UMA_TEST_MODEL_ID="qwen3-4b"; node scripts/e2e-local.cjs
 ```
 
-The test data lands in `.testdata/` and is gitignored. 
+The test data lands in `.testdata/` and is gitignored. The real-model tasks (`npm run test:model`) work in the system's temporary folder instead (`uma-llm-e2e-tasks`), outside this repository, because the model runs real commands there. 
+
+### Trying Uma on a Mac
+
+Uma is developed and tested on Windows. To try it on a real Mac without owning one, run the **Mac check** on GitHub (Actions → Mac check → Run workflow, [.github/workflows/mac-check.yml](.github/workflows/mac-check.yml)): on an Apple Silicon and an Intel Mac it runs `npm test`, starts the app, and attaches screenshots of the start window and the main window to the run. It builds nothing for release.
+
+### Signing the installers
+
+The installers are not signed, so Windows shows the SmartScreen warning and macOS refuses to open the app until the user allows it. Signing needs a certificate in the publisher's name, which only the publisher can obtain; the build itself needs no change:
+
+- **Windows.** `electron-builder` signs the installer and the app when it finds a certificate: set `CSC_LINK` (the `.pfx` file, or its base64 text) and `CSC_KEY_PASSWORD` before `npm run dist`. Certificates sold today keep their key on a hardware token or in a cloud service; for those, `electron-builder` has `win.azureSignOptions` (Azure Trusted Signing) and `win.signtoolOptions.sign` (your own signing command). An open-source project such as this one can also apply to the SignPath Foundation, which signs releases of open-source programs at no cost. Check each provider's current terms and prices before choosing.
+- **macOS.** Needs the Apple Developer Program (a yearly fee) for a *Developer ID Application* certificate, and each release must be notarized by Apple. `scripts/make_mac.py` assembles the Mac zips on Windows without signing; with a certificate, build on a Mac (or a macOS runner) with `electron-builder --mac` after removing `"identity": null` from `.electron-builder.json` and setting `CSC_LINK`, `CSC_KEY_PASSWORD`, `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD` and `APPLE_TEAM_ID`.
+- **Updates.** The in-app updater checks what it downloads against the release (its size, and its SHA-256 when the release gives one), whether or not the installer is signed.
 
 ## Limitations
 
-- Windows is the packaged/tested target. macOS and Linux code paths exist for llama.cpp assets, but no installers are produced here.
+- Windows is the packaged/tested target. The macOS and Linux builds are assembled on Windows and have not been run by hand on those systems (see *Trying Uma on a Mac*). Finding and clicking things by their name (`find_on_screen`, `click_text`) works on Windows only.
+- Skills from the library that work only through a connector of another assistant (an MCP server; 992 of 6,236) are listed but never given to the model: Uma has no connectors.
 - GPU acceleration on Windows uses CUDA (NVIDIA only) or Vulkan (NVIDIA/AMD/Intel). You choose under **Models → Inference engine**; a CPU fallback is available.
 - The model catalog is intentionally small and curated. Any compatible GGUF can be imported or downloaded by URL.
 - A very small model can loop or produce malformed tool calls. Uma shows the error; use a 4B+ model for agentic work.
 - Context length is configurable up to 32k, but large contexts need more memory.
-- The installer is unsigned.
+- The installers are unsigned (see *Signing the installers*).
 
 ## Credits
 

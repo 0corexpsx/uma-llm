@@ -7458,6 +7458,17 @@ a {
   margin: 6px 4px;
 }
 
+/* What is new in the version found (Settings → Updates): the release's own text. */
+.update-notes {
+  white-space: pre-wrap;
+  font-size: 12.5px;
+  line-height: 1.5;
+  opacity: 0.85;
+  margin: 4px 18px 12px;
+  max-height: 220px;
+  overflow: auto;
+}
+
 .catalog-versions-link {
   background: none;
   border: 0;
@@ -8601,3 +8612,31 @@ a {
 .superseded-block > summary::before { content: "▸ "; }
 .superseded-block[open] > summary::before { content: "▾ "; }
 .superseded-block[open] { font-size: 13px; opacity: .8; }
+
+/* Several graphics cards: one small graph per card in the panel on the right (GpuCards.jsx).
+   Two series, checked against the blue panel (#133c78) with the dataviz validator: 3:1 contrast,
+   and apart for color-blind readers (worst pair 25.6). Lighter than usual for a dark theme, because
+   the panel is a mid blue, not near-black. */
+.gpu-cards { --gpu-series: #74b5ff; --vram-series: #f47b3a; }
+:root[data-theme='light'] .gpu-cards { --gpu-series: #2a78d6; --vram-series: #eb6834; }
+.gpu-cards-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+.gpu-cards-head strong { font-size: 12px; font-weight: 600; color: var(--text); }
+.gpu-cards-head span { font-size: 9.5px; color: var(--faint); }
+.gpu-card + .gpu-card { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+.gpu-card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.gpu-card-head strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 600; color: var(--text-soft); }
+.gpu-card-when { flex: none; font-size: 9.5px; color: var(--faint); font-variant-numeric: tabular-nums; }
+.gpu-card-values { display: flex; flex-wrap: wrap; gap: 2px 12px; margin: 3px 0 5px; font-size: 10px; color: var(--muted); }
+.gpu-card-values span { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.gpu-card-values b { font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
+.gpu-key { display: inline-block; width: 10px; height: 2px; border-radius: 1px; }
+.gpu-key.is-gpu { background: var(--gpu-series); }
+.gpu-key.is-vram { background: var(--vram-series); }
+.gpu-card-graph { display: block; width: 100%; height: 44px; overflow: visible; cursor: crosshair; touch-action: none; }
+.gpu-card-graph line, .gpu-card-graph polyline { vector-effect: non-scaling-stroke; fill: none; }
+.gpu-grid { stroke: var(--line); stroke-width: 1; }
+.gpu-grid.is-base { stroke: rgba(var(--fg-rgb), 0.2); }
+.gpu-line { stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.gpu-line.is-gpu { stroke: var(--gpu-series); }
+.gpu-line.is-vram { stroke: var(--vram-series); }
+.gpu-crosshair { stroke: rgba(var(--fg-rgb), 0.45); stroke-width: 1; }

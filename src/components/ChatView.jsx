@@ -36,7 +36,7 @@ const SUGGESTIONS = [
 
 function iconForTool(name) {
   if (name === 'read_file') return FileSearch;
-  if (name === 'write_file' || name === 'append_file' || name === 'replace_in_file') return PencilLine;
+  if (name === 'write_file' || name === 'append_file' || name === 'replace_in_file' || name === 'save_document') return PencilLine;
   if (name === 'list_files') return ListTree;
   if (name === 'search_files') return Search;
   if (name === 'delete_file') return Trash2;

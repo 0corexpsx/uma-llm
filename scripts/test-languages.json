@@ -1,0 +1,43 @@
+{
+  "requests": [
+    ["make a website for my bakery", "crée un site web pour ma boulangerie", "Erstelle eine Website für meine Bäckerei", "crie um site para a minha padaria"],
+    ["fix the bug in the login form", "corrige le bug dans le formulaire de connexion", "Behebe den Fehler im Anmeldeformular", "corrija o bug no formulário de login"],
+    ["add a contact page to the site", "ajoute une page de contact au site", "Füge der Website eine Kontaktseite hinzu", "adicione uma página de contato ao site"],
+    ["write the tests for this file", "écris les tests pour ce fichier", "Schreibe die Tests für diese Datei", "escreva os testes para este arquivo"],
+    ["explain this project", "explique ce projet", "Erkläre dieses Projekt", "explique este projeto"],
+    ["what is this project?", "qu'est-ce que ce projet ?", "Was ist dieses Projekt?", "o que é este projeto?"],
+    ["did you fix the bug in main.cpp?", "as-tu corrigé le bug dans main.cpp ?", "Hast du den Fehler in main.cpp behoben?", "você corrigiu o bug em main.cpp?"],
+    ["how do I create a website?", "comment créer un site web ?", "Wie erstelle ich eine Website?", "como criar um site?"],
+    ["what is the capital of France?", "quelle est la capitale de la France ?", "Was ist die Hauptstadt von Frankreich?", "qual é a capital da França?"],
+    ["can you add a button to my site?", "peux-tu ajouter un bouton à mon site ?", "Kannst du meiner Website eine Schaltfläche hinzufügen?", "você pode adicionar um botão ao meu site?"],
+    ["tell me a joke", "raconte-moi une blague", "Erzähl mir einen Witz", "conte-me uma piada"],
+    ["thanks, that works", "merci, ça marche", "Danke, das funktioniert", "obrigado, funcionou"],
+    ["continue", "continuez", "mach weiter", "continuar"],
+    ["is the performance ok?", "est-ce que les performances sont bonnes ?", "Ist die Leistung in Ordnung?", "está tudo bem com o desempenho?"]
+  ],
+  "sayings": [
+    ["change", true, [
+      "J'ai corrigé le bug dans main.cpp.", "J'ai déjà mis à jour le fichier index.html.", "Le fichier a été mis à jour.", "J'ai ajouté la fonction et modifié le style.", "La compilation a réussi.", "C'est maintenant corrigé.",
+      "Ich habe den Fehler in main.cpp behoben.", "Die Datei wurde aktualisiert.", "Ich habe die Funktion hinzugefügt und den Stil geändert.", "Der Build war erfolgreich.", "Die Datei index.html ist aktualisiert worden.",
+      "Corrigi o bug em main.cpp.", "O arquivo foi atualizado.", "Já adicionei a função.", "A compilação foi bem-sucedida.", "Eu atualizei o arquivo index.html."
+    ]],
+    ["change", false, [
+      "Je n'ai rien modifié.", "Si tu veux, je peux corriger le bug.", "As-tu corrigé le bug ?", "Je pourrais ajouter une fonction.", "Le fichier n'a pas été mis à jour.", "Le code est correct et bien organisé.", "La fonction met à jour l'état quand vous cliquez sur le bouton.", "Pour le corriger, vous devez mettre à jour le fichier.",
+      "Ich habe nichts geändert.", "Wenn du möchtest, kann ich den Fehler beheben.", "Hast du den Fehler behoben?", "Ich könnte eine Funktion hinzufügen.", "Die Datei wurde nicht aktualisiert.", "Der Code ist korrekt und gut organisiert.", "Die Funktion aktualisiert den Zustand, wenn du auf die Schaltfläche klickst.",
+      "Não modifiquei nada.", "Se quiser, posso corrigir o bug.", "Você corrigiu o bug?", "Eu poderia adicionar uma função.", "O arquivo não foi atualizado.", "O código está correto e bem organizado.", "A função atualiza o estado quando você clica no botão."
+    ]],
+    ["tool", true, ["J'ai utilisé read_file pour lire le fichier.", "Ich habe read_file verwendet.", "Usei read_file para ler o arquivo."]],
+    ["missing", true, ["Le fichier electron/main.cjs n'existe pas.", "Die Datei electron/main.cjs existiert nicht.", "O arquivo electron/main.cjs não existe.", "Je n'ai pas trouvé main.cjs.", "main.cjs wurde nicht gefunden.", "Não encontrei main.cjs."]],
+    ["asksSee", true, ["que vois-tu ?", "peux-tu voir mon écran ?", "Was siehst du?", "Kannst du meinen Bildschirm sehen?", "o que você vê?", "você consegue ver a minha tela?"]],
+    ["sight", true, ["Je vois la fenêtre du navigateur.", "Voici ce que je vois.", "Ich sehe das Browserfenster.", "Vejo a janela do navegador.", "Aqui está o que vejo."]],
+    ["cannotInput", true, ["Je ne peux pas cliquer sur le bouton.", "Ich kann nicht auf die Schaltfläche klicken.", "Ich kann die Maus nicht steuern.", "Não posso clicar no botão."]],
+    ["pretendsInput", true, ["Je clique sur le bouton.", "Je vais cliquer sur le lien.", "Ich klicke auf die Schaltfläche.", "Eu clico no botão.", "Vou clicar no link."]],
+    ["done", true, ["J'ai ouvert YouTube.", "La tâche est terminée.", "Ich habe YouTube geöffnet.", "Die Aufgabe ist erledigt.", "Abri o YouTube.", "A tarefa foi concluída."]],
+    ["nextStep", true, ["Je vais maintenant lire le fichier.", "Laissez-moi vérifier le code.", "Ich werde jetzt die Datei lesen.", "Als Nächstes prüfe ich den Code.", "Lass mich die Datei prüfen.", "Agora vou ler o arquivo.", "Deixe-me verificar o arquivo."]],
+    ["nextStep", false, ["Le fichier contient trois fonctions.", "Merci pour votre patience.", "Die Datei enthält drei Funktionen.", "Danke für die Geduld.", "O arquivo contém três funções.", "Obrigado pela paciência."]],
+    ["offers", true, ["Voulez-vous que je corrige le bug ?", "Soll ich den Fehler beheben?", "Möchtest du, dass ich fortfahre?", "Quer que eu corrija o bug?"]],
+    ["build", true, ["La compilation a réussi.", "Compile sans erreurs.", "Der Build war erfolgreich.", "Kompiliert ohne Fehler.", "A compilação foi bem-sucedida.", "Compila sem erros."]],
+    ["agrees", true, ["oui", "d'accord", "ja", "in Ordnung", "sim", "tudo bem"]],
+    ["recall", true, ["te souviens-tu de cette conversation ?", "résume cette conversation", "Erinnerst du dich an diesen Chat?", "você se lembra desta conversa?", "resuma esta conversa"]]
+  ]
+}

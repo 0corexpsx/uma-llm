@@ -1,18 +1,25 @@
 {
   "name": "uma-llm",
   "productName": "Uma LLM",
-  "version": "0.2.86",
+  "version": "0.2.89",
   "description": "Uma LLM: a private AI assistant that runs local models on your own PC.",
   "desktopName": "uma-llm.desktop",
   "main": "electron/main.cjs",
   "license": "GPL-3.0-or-later",
   "author": "Ocorex",
   "homepage": "https://www.0corexpsx.com/uma",
+  "updates": {
+    "feed": "https://api.github.com/repos/0corexpsx/uma-llm/releases/latest",
+    "downloads": "https://github.com/0corexpsx/uma-llm/releases/download/",
+    "page": "https://github.com/0corexpsx/uma-llm/releases"
+  },
   "scripts": {
     "start": "vite build && electron .",
     "dev": "node scripts/dev.cjs",
     "build": "vite build",
-    "test": "node scripts/test-security.cjs && node scripts/test-agent.cjs && node scripts/test-review.cjs && node scripts/test-recovery.cjs && node scripts/test-download-pause.cjs && node scripts/i18n-check.cjs",
+    "test": "node scripts/test-security.cjs && node scripts/test-agent.cjs && node scripts/test-review.cjs && node scripts/test-recovery.cjs && node scripts/test-download-pause.cjs && node scripts/test-updater.cjs && node scripts/i18n-check.cjs",
+    "test:model": "node scripts/e2e-tasks.cjs",
+    "test:ui": "node scripts/test-ui.cjs",
     "skills:library": "node scripts/make_skill_library.cjs",
     "package": "electron-builder --config .electron-builder.json",
     "pack": "vite build && electron-builder --config .electron-builder.json --dir",

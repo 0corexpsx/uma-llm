@@ -1,4 +1,4 @@
-// Where a model's layers go when helper PCs take part.
+// Where a model's layers go when helper PCs take part, or when this PC has several graphics cards.
 //
 // llama.cpp's --fit fills the last device in its list first and gives the earlier ones what is left.
 // Left alone, that fills this PC's GPU and leaves a helper's GPU half empty, and a helper's RAM is
@@ -128,6 +128,32 @@ function planPlacement({ devices, helpers = [], needMB, mainFreeRamMB = 0, force
   };
 }
 
+/** A card's name the way both nvidia-smi and llama.cpp write it, for comparing: "tesla p40". */
+function cardKey(name) {
+  return String(name || '').toLowerCase().replace(/\bnvidia\b|\bcorporation\b|\((?:r|tm)\)/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Which of this PC's graphics cards (their names, from nvidia-smi) the engine lists as devices.
+ * `used` are the engine's devices for those cards, in the engine's order; `missing` are the cards
+ * it does not list. An engine can leave a card out: a CUDA 13 build has no code for a Tesla P40 or
+ * a GTX 10 card, and Vulkan cannot see a card that is in compute-only mode. A device that is none
+ * of the cards (an integrated GPU) is left to llama.cpp, which uses one only when nothing else is there.
+ */
+function localCards(devices, names) {
+  const cards = names.map((name) => ({ name, key: cardKey(name), taken: false }));
+  const used = [];
+  for (const device of devices) {
+    if (/^(?:RPC|CPU)/i.test(device.name)) continue;
+    const key = cardKey(device.description);
+    const card = key && cards.find((item) => !item.taken && item.key && (item.key === key || key.includes(item.key) || item.key.includes(key)));
+    if (!card) continue;
+    card.taken = true;
+    used.push({ ...device, card: card.name });
+  }
+  return { used, missing: cards.filter((card) => !card.taken).map((card) => card.name) };
+}
+
 /** llama-server arguments for a plan. */
 function placementArgs(plan) {
   if (!plan?.devices.length) return [];
@@ -141,4 +167,4 @@ function placementArgs(plan) {
   return [...names, '--fit-target', plan.devices.map((device) => device.targetMB).join(',')];
 }
 
-module.exports = { planPlacement, placementArgs, parseDeviceList, labelDevices, GPU_MARGIN_MB, DEFAULT_RAM_RESERVE_MB };
+module.exports = { planPlacement, placementArgs, parseDeviceList, labelDevices, localCards, GPU_MARGIN_MB, DEFAULT_RAM_RESERVE_MB };

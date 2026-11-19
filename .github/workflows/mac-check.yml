@@ -1,0 +1,56 @@
+# Tries Uma on a real Mac: the tests that need no model, then the app itself is started and its
+# start window and main window are checked and photographed. Uma is developed on Windows and has
+# never been run on macOS by hand; this is how to find out what does not work there.
+#
+# It starts only by hand: GitHub → Actions → "Mac check" → Run workflow. The screenshots and the
+# test log are attached to the run as "mac-check". Nothing is built for release and nothing is
+# published. (macOS runners are free for a public repository and count ten times against the
+# included minutes of a private one; one run takes a few minutes.)
+name: Mac check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mac:
+    name: Tests and first start on macOS (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # Apple Silicon and Intel.
+        os: [macos-latest, macos-13]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Tests that need no model
+        run: npm test
+
+      - name: Build the window
+        if: always()
+        run: npm run build
+
+      # The real app with its own empty data folder: licence and start window, then Uma's window.
+      - name: Start Uma
+        if: always()
+        run: npx electron scripts/ui-start-test.cjs en
+
+      - name: Keep the screenshots and the log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-check-${{ matrix.os }}
+          path: .shots/
+          if-no-files-found: warn

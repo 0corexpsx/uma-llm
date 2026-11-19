@@ -8,12 +8,13 @@ const http = require('node:http');
 const assert = require('node:assert');
 const { Store } = require('../electron/lib/store.cjs');
 const { Workspace } = require('../electron/lib/workspace.cjs');
-const { ToolRunner, replaceInLegacyText } = require('../electron/lib/tools.cjs');
+const { ToolRunner, replaceInLegacyText, toolDocs: toolDocsFor } = require('../electron/lib/tools.cjs');
 const { ConversationStore } = require('../electron/lib/conversations.cjs');
-const { AgentRunner } = require('../electron/lib/agent.cjs');
-const { SkillStore, parseSkill, rankSkills, isStrongMatch } = require('../electron/lib/skills.cjs');
+const { AgentRunner, systemPrompt, classifyTask, claims, CLAIMS_CHANGE_RE, toolsClaimed, saysMissing, asksToSee, says, REPLY_CHECKS } = require('../electron/lib/agent.cjs');
+const { SkillStore, skillConnector, outsideService, parseSkill, rankSkills, isStrongMatch, worthAsking, clearSkillChoice, fitSkillBody } = require('../electron/lib/skills.cjs');
+const { englishGist } = require('../electron/lib/gist.cjs');
 const { SkillLibrary } = require('../electron/lib/skillLibrary.cjs');
-const { allowedTools, toolCallSchema, extractToolCall } = require('../electron/lib/toolcall.cjs');
+const { allowedTools, toolCallSchema, extractToolCall, cutOffWrite } = require('../electron/lib/toolcall.cjs');
 const { planPlacement, placementArgs, parseDeviceList } = require('../electron/lib/placement.cjs');
 const { downloadFile, ensureDir } = require('../electron/lib/util.cjs');
 
@@ -361,7 +362,12 @@ async function testSkillRanking() {
     return { message: await finished, calls };
   };
 
-  let run = await chat(['{"skill":"cold-email"}', 'Here is the email.'], 'write a cold email to a potential customer');
+  // Asked for by its whole name, the skill is loaded with no question at all.
+  let run = await chat(['Here is the email.'], 'write a cold email to a potential customer');
+  assert.equal(run.calls.length, 1, 'no extra reply to choose the skill');
+  assert.match(run.calls[0].messages.at(-1).content, /Steps for cold-email/);
+  // A request that only comes close is put to the model, with the matches.
+  run = await chat(['{"skill":"cold-email"}', 'Here is the email.'], 'write an email to a potential customer for our sales outreach');
   const system = run.calls[0].messages[0].content;
   assert.match(system, /80 skills are installed/);
   assert.doesNotMatch(system, /- docker-expert:/, 'the prompt does not list a library');
@@ -435,6 +441,78 @@ async function testSkillLibrary() {
   assert.equal(fs.existsSync(path.join(globalDir, 'evil', 'SKILL.md')), true);
   // An app built without a library just has an empty one.
   assert.equal((await new SkillLibrary({ dir: path.join(dir, 'missing') }).search({})).librarySize, 0);
+
+  // Skills that work only through a connector of other assistants (882 of the real library's 6,236
+  // are "Automate X via Rube MCP (Composio)": every step calls RUBE_SEARCH_TOOLS, which Uma does not
+  // have). The header says so in two spellings; where it is silent the description or the steps do.
+  // A skill ABOUT connectors (building or checking a server) needs none.
+  assert.equal(skillConnector('name: a\nrequires:\n  mcp: [rube]\n'), 'rube');
+  assert.equal(skillConnector('name: a\nrequires:\n  mcp:\n    - rube\n'), 'rube');
+  assert.equal(skillConnector('name: a', 'Automate Ably tasks via Rube MCP (Composio). Always search tools first.'), 'rube');
+  assert.equal(skillConnector('name: a', "Automate Slack workspace operations through Composio's Slack toolkit."), 'rube');
+  assert.equal(skillConnector('name: a', 'Automate Box.', 'Call `RUBE_SEARCH_TOOLS` first.'), 'rube');
+  assert.equal(skillConnector('name: a\nrequires: terminal\n', 'Audit MCP servers for tool poisoning.'), '');
+  assert.equal(skillConnector('name: a', 'Abuses delegation with Impacket and Rubeus.'), '', '"Rubeus" is not Rube');
+  assert.equal(parseSkill('---\nname: ably-automation\ndescription: Automate Ably tasks.\nrequires:\n  mcp: [rube]\n---\nSteps.').connector, 'rube');
+  // Other connectors (110 more in the real library), each said in its own way.
+  for (const [header, description, body, connector] of [
+    ['name: flowstudio-debug', 'Debug failing Power Automate cloud flows using the FlowStudio MCP server.', '', 'FlowStudio'],
+    ['name: apple-notes-search', "Search the user's own Apple Notes via the apple-notes MCP server.", '', 'apple-notes'],
+    ['name: altorank', 'Run AltoRank through its hosted MCP server: audits and keyword research.', '', 'mcp'],
+    ['name: browser-testing', 'Test browser apps with Chrome DevTools MCP by inspecting the live DOM.', '', 'Chrome DevTools'],
+    ['name: serply-search-mcp', 'Search Google and Bing, and read public pages.', '', 'mcp'],
+    ['name: datawebot', 'Find products for sale across online shops.', 'Requires the hosted datawebot MCP.\n\nSteps.', 'datawebot'],
+    ['name: busabase', 'Manage Busabase workspace records.', '## Before you start\n- An authorized Busabase MCP server must already be connected.', 'Busabase'],
+    ['name: aident-loadout', 'Run multi-step work across connected apps.', 'Tools come from the hosted `aident` MCP server.', 'aident'],
+    ['name: jira-expert', 'Jira setup and queries: JQL, workflows, dashboards.', 'Call mcp__atlassian__search, then mcp__atlassian__get_issue, then mcp__atlassian__update_issue.', 'atlassian'],
+    ['name: github-issues\nallowed-tools: mcp__github__create_issue', 'Create and manage GitHub issues.', 'Steps.', 'mcp'],
+    // Not through a connector: about one, another way offered, none needed, or named once in passing.
+    ['name: mcp-builder', 'Build an MCP server in Python or TypeScript, with tools and tests.', 'Steps about MCP.', ''],
+    ['name: aws-mcp-setup', 'Configure AWS MCP servers for documentation search.', '', ''],
+    ['name: agent-qa', 'Create and run Agent QA tests through MCP or CLI.', '', ''],
+    ['name: cooper-email', 'Give an agent its own inbox: send and receive over MCP or HTTP.', '', ''],
+    ['name: gmail-automation', 'Lightweight Gmail integration with standalone OAuth. No MCP server required.', '', ''],
+    ['name: apify-scraper', 'Search and export job postings with an Apify Actor.', '- Apify CLI, or the Apify MCP server.\n| mcpConnector | Needs an MCP connector the user authorized |', ''],
+    ['name: daily-report', 'Scrape a preset URL list and write a daily report.', 'If it is there, mcp__chrome__open can render the page.', ''],
+    ['name: ios-review', 'Review an iPhone app screen.', 'It needs the optional UXKIN MCP only for reference screens.', ''],
+  ]) assert.equal(skillConnector(header, description, body), connector, `${header.split('\n')[0]}: ${description}`);
+  // A request to act IN an online service (Uma cannot reach it), as against one about a service.
+  for (const [text, service] of [
+    ['post the message "hello team" in my Slack channel #general', 'Slack'], ['create a Jira ticket for the bug in calc.js', 'Jira'], ['add this to our Notion', 'Notion'],
+    ['send it to the team on Slack', 'Slack'], ['schedule a meeting in Google Calendar for Monday', 'Google Calendar'], ['open an Asana task for this', 'Asana'],
+    ['write a Slack bot in Python', null], ['how does the Jira API work?', null], ['make the page look like Notion', null], ['build a Shopify theme', null],
+    ['add a function to calc.js that posts the result to Slack', null], ['write a script to send messages to my Slack channel', null], ['create a webhook for our Jira', null],
+    ['explain what Slack is', null], ['fix the bug in calc.js', null], ['create a ticket system for my site', null], ['update the Trello-style board component', null],
+  ]) assert.equal(outsideService(text)?.name || null, service, text);
+  // Such a skill stays in the library's list, marked, and is never given to the model.
+  const linkedDir = path.join(dir, 'linked');
+  const linked = [
+    { name: 'ably-automation', description: 'Automate Ably tasks via Rube MCP (Composio).', risk: 'critical', tags: [], files: [], connector: 'rube' },
+    { name: 'ably-notes', description: 'Write notes about Ably channels in a file.', risk: 'safe', tags: [], files: [] },
+  ];
+  for (const entry of linked) {
+    await ensureDir(path.join(linkedDir, 'skills', entry.name));
+    await fsp.writeFile(path.join(linkedDir, 'skills', entry.name, 'SKILL.md'), `---\nname: ${entry.name}\ndescription: ${entry.description}\n${entry.connector ? 'requires:\n  mcp: [rube]\n' : ''}---\nSteps.`);
+  }
+  await fsp.writeFile(path.join(linkedDir, 'index.json'), JSON.stringify({ version: 1, skills: linked }));
+  const linkedLibrary = new SkillLibrary({ dir: linkedDir });
+  page = await linkedLibrary.search({});
+  assert.deepEqual([page.librarySize, page.usableSize], [2, 1]);
+  assert.deepEqual(page.items.map((item) => [item.name, item.connector]), [['ably-automation', 'rube'], ['ably-notes', '']]);
+  assert.deepEqual((await linkedLibrary.search({ risk: 'connector' })).items.map((item) => item.name), ['ably-automation']);
+  const linkedStore = new Store(path.join(dir, 'linked-data'));
+  await linkedStore.init();
+  const linkedGlobal = path.join(dir, 'linked-global');
+  const linkedSkills = new SkillStore({ globalDir: linkedGlobal, store: linkedStore, library: linkedLibrary });
+  assert.deepEqual((await linkedSkills.enabled('')).map((skill) => skill.name), ['ably-notes'], 'the model is offered only what it can use');
+  await assert.rejects(linkedSkills.load('ably-automation', ''), /cannot be used here: it works only through the Rube \(Composio\) connector[\s\S]*Uma has no connectors/);
+  assert.equal((await linkedSkills.load('ably-notes', '')).name, 'ably-notes');
+  // Installed (to read or edit it), it is listed with its connector and still not given to the model.
+  await linkedLibrary.install('ably-automation', linkedGlobal);
+  linkedSkills.invalidate();
+  assert.deepEqual((await linkedSkills.list('')).map((skill) => [skill.name, skill.connector]), [['ably-automation', 'rube']]);
+  assert.deepEqual((await linkedSkills.enabled('')).map((skill) => skill.name), ['ably-notes']);
+  await assert.rejects(linkedSkills.load('ably-automation', ''), /works only through the Rube \(Composio\) connector/);
 
   // The real library, when it has been built: every entry is installable as indexed.
   const built = path.join(__dirname, '..', 'build', 'skill-library');
@@ -1322,6 +1400,1208 @@ async function testBatchTuner() {
   console.log('batch size tuning from measured reading speeds: OK');
 }
 
+async function testSkillWorkflow() {
+  // A request in Italian or Spanish is the same kind of request as its English form. Before, each of
+  // these was taken for small talk: no skill was offered and the file tools were taken away.
+  const kind = (text) => {
+    const task = classifyTask(text);
+    return [Boolean(task.agentic), Boolean(task.wantsEdit), Boolean(task.asksOnly), Boolean(task.isContinue)].join();
+  };
+  const pairs = [
+    ['make a website for my bakery', 'crea un sito web per la mia pizzeria'],
+    ['make a website for my bakery', 'crea un sitio web para mi panadería'],
+    ['fix the bug in the login form', 'correggi il bug nel form di login'],
+    ['add a contact page to the site', 'aggiungi una pagina contatti al sito'],
+    ['write the tests for this file', 'scrivi i test per questo file'],
+    ['explain this project', 'spiegami questo progetto'],
+    ['did you fix the bug in main.cpp?', 'hai corretto il bug in main.cpp?'],
+    ['how do I create a website?', 'come si crea un sito web?'],
+    ['what is the capital of France?', 'qual è la capitale della Francia?'],
+    ['can you add a button to my site?', 'puoi aggiungere un pulsante al mio sito?'],
+    ['tell me a joke', 'raccontami una barzelletta'],
+    ['thanks, that works', 'grazie, ora funziona'],
+    ['continue', 'continua'],
+  ];
+  for (const [english, other] of pairs) assert.equal(kind(other), kind(english), `"${other}" is read like "${english}"`);
+  assert.equal(kind('crea un sito web per la mia pizzeria'), 'true,true,false,false');
+  // English, and a language Uma has no words for (Russian, Korean), is left exactly as it was written.
+  for (const text of ['fix the bug in the login form', 'How do I come up with a plan?', 'make an uno card game', 'ai agent builder', 'compute a modulo b', 'что это за проект?', '이 프로젝트는 무엇입니까?', '']) {
+    assert.equal(englishGist(text), text);
+  }
+  // File names and paths keep their spelling.
+  assert.equal(englishGist('correggi il bug in src/Pagina.jsx'), 'fix the bug in src/Pagina.jsx');
+  assert.equal(englishGist("cos'è questo progetto?"), 'what is this project?');
+
+  // Which skill is offered first.
+  const library = (name, description) => ({ name, description, source: 'library', meta: { tags: [], category: '' } });
+  const pool = [
+    { name: 'fix-bug', description: 'Find and fix a bug, crash or error in existing code.', source: 'global', meta: {} },
+    library('fix', 'Diagnose and fix a failing Playwright test.'),
+    library('bug-hunter', 'Systematically finds and fixes bugs.'),
+    library('settings', 'Old name of project-settings.'),
+    library('slack-automation', 'Automate Slack tasks via Rube MCP (Composio).'),
+    library('slack-messages', 'Write Slack posts for a team channel.'),
+    ...makeSkills(200).map((skill) => ({ ...skill, source: 'library' })),
+  ];
+  assert.equal(rankSkills(pool, 'fix the bug in the login form', 3)[0].skill.name, 'fix-bug', 'the skill written for Uma goes first');
+  assert.equal(rankSkills(pool, englishGist('correggi il bug nel form di login'), 3)[0].skill.name, 'fix-bug', 'the same in Italian');
+  // Asked for word by word, one of Uma's own skills is chosen without a question to the model;
+  // a library skill, a partial match or a close second is still put to the model.
+  assert.equal(clearSkillChoice(rankSkills(pool, 'fix the bug in the login form', 8))?.name, 'fix-bug');
+  assert.equal(clearSkillChoice(rankSkills(pool, englishGist('correggi il bug nel form di login'), 8))?.name, 'fix-bug');
+  assert.equal(clearSkillChoice(rankSkills(pool, 'hunt the bug down', 8)), null, 'a library skill is not chosen unasked');
+  assert.equal(clearSkillChoice(rankSkills(pool, 'fix the layout', 8)), null, 'half of a name is not enough');
+  assert.equal(clearSkillChoice(rankSkills([...pool, { name: 'bug-fix', description: 'Fix a bug.', source: 'global', meta: {} }], 'fix the bug', 8)), null, 'two skills as close as each other');
+  assert.equal(clearSkillChoice([]), null);
+  assert.equal(clearSkillChoice(rankSkills(pool, 'use the bug hunter skill on this', 8))?.name, 'bug-hunter', 'named as a skill, a library skill is loaded too');
+  // What is put to the model when it is asked: a wrong skill costs more than none, and a real 9B
+  // model picked loosely matched ones (a Swift skill for JavaScript tests).
+  const asked = (text, agentic = true) => rankSkills([...pool,
+    library('write-swift', 'Write and review modern Swift code and tests.'),
+    library('landing-page-generator', 'Generates landing pages with React and a button.'),
+    library('docker-compose', 'Define and run multi-container Docker applications.'),
+    library('commit', 'Use for every request to commit changes or draft a commit message.'),
+    library('scan', 'Scans the codebase to generate a project document.'),
+    library('assay', 'Write questions and answers that test a page of text.'),
+  ], text, 8).filter((entry) => worthAsking(entry, { agentic })).map((entry) => entry.skill.name);
+  assert.deepEqual(asked('write the tests for calc.js'), [], 'half of a library skill\'s name is not enough');
+  assert.deepEqual(asked('make a web page with a title and a button'), []);
+  assert.deepEqual(asked('write a docker compose file for my app'), ['docker-compose']);
+  assert.deepEqual(asked('commit my changes with a good message'), ['commit'], 'a one-word name, with its description');
+  assert.deepEqual(asked('scan my server for open ports'), []);
+  assert.deepEqual(asked('write a page with questions and answers about cats'), [], 'a one-word name that is not in the request');
+  assert.deepEqual(asked('fix the bug in the login form'), ['fix-bug']);
+  assert.deepEqual(asked('be a bug hunter on this module'), ['bug-hunter']);
+  // A one-word name is an ordinary word of a request, not the skill being named.
+  const settings = rankSkills(pool, 'add a dark mode toggle to the settings page', 8).find((entry) => entry.skill.name === 'settings');
+  assert.equal(isStrongMatch(settings), false);
+  assert.equal(rankSkills(pool, 'use the settings skill', 3)[0].skill.name, 'settings');
+  // A skill that drives another assistant's connectors stays findable, behind one that can work here.
+  assert.deepEqual(rankSkills(pool, 'automate my slack posts', 2).map((entry) => entry.skill.name), ['slack-messages', 'slack-automation']);
+  assert.equal(rankSkills(pool, 'use slack automation', 2)[0].skill.name, 'slack-automation', 'named outright, it is still the first');
+
+  // A skill longer than the context allows keeps its steps and the part the request is about.
+  const filler = (topic, count) => Array.from({ length: count }, (_, index) => `${topic} detail ${index}: some text that explains one more thing about it.`);
+  const body = [
+    '# Deploy helper', 'Helps to ship a web app.', '',
+    '## When to use', ...filler('Usage', 30), '',
+    '## Steps', '1. Build the image.', '2. Push it.', '',
+    '## Kubernetes', ...filler('Cluster', 60), '',
+    '## Docker', 'Write the Dockerfile first.', ...filler('Image', 6), '',
+    '## References', ...filler('Link', 40),
+  ].join('\n');
+  const fitted = fitSkillBody(body, 1500, 'write a dockerfile for my app', 5);
+  assert.ok(fitted.text.length <= 1500, `${fitted.text.length} characters`);
+  assert.match(fitted.text, /## Steps\n1\. Build the image\.\n2\. Push it\./);
+  assert.match(fitted.text, /## Docker\nWrite the Dockerfile first\./);
+  assert.doesNotMatch(fitted.text, /## References|## Kubernetes/);
+  assert.match(fitted.text, /\[Left out: .*"Kubernetes" \(lines \d+-\d+\)/);
+  // The lines named are the lines of SKILL.md, header included.
+  const fileLines = ['---', 'name: deploy-helper', 'description: d', '---', ...body.split('\n')];
+  for (const item of fitted.left) {
+    const heading = item.heading.match(/^"(.*)"$/)?.[1];
+    if (heading) assert.equal(fileLines[item.start - 1], `## ${heading}`);
+  }
+  assert.equal(parseSkill(fileLines.join('\n')).bodyLine, 5);
+  assert.deepEqual(fitSkillBody('Short steps.', 1500, 'anything'), { text: 'Short steps.', left: [] });
+  // Without headings there is nothing to choose between: the room is used from the start.
+  const flat = fitSkillBody(filler('Plain', 200).join('\n'), 1500, '', 1);
+  assert.ok(flat.text.length > 1000 && flat.text.length <= 1500, `${flat.text.length} characters`);
+
+  // Through the agent, with a library: an Italian task is asked about its skill, and the long skill
+  // arrives fitted, with the part about the request.
+  const dir = path.join(root, 'workflow');
+  await fsp.rm(dir, { recursive: true, force: true });
+  const libraryDir = path.join(dir, 'library');
+  const siteBody = [
+    '# Restaurant website', 'Builds a small site for a place that serves food.', '',
+    '## Background', ...filler('History', 80), '',
+    '## Steps', '1. Create index.html with the menu.', '2. Add the opening hours.', '',
+    '## Hosting', ...filler('Server', 80),
+  ].join('\n');
+  const entries = [
+    { name: 'pizzeria-website', description: 'Create a website for a restaurant or pizzeria.', risk: 'safe', tags: [], files: [] },
+    ...makeSkills(60).map((skill) => ({ name: skill.name, description: skill.description, risk: 'unknown', tags: [], files: [] })),
+  ];
+  for (const entry of entries) {
+    await ensureDir(path.join(libraryDir, 'skills', entry.name));
+    await fsp.writeFile(path.join(libraryDir, 'skills', entry.name, 'SKILL.md'), `---\nname: ${entry.name}\ndescription: ${entry.description}\n---\n${entry.name === 'pizzeria-website' ? siteBody : 'Steps.'}`);
+  }
+  await fsp.writeFile(path.join(libraryDir, 'index.json'), JSON.stringify({ version: 1, skills: entries }));
+  const store = new Store(path.join(dir, 'data'));
+  await store.init();
+  await store.updateSettings({ allowEdits: true });
+  const workspaceDir = path.join(dir, 'workspace');
+  await ensureDir(workspaceDir);
+  const workspace = new Workspace({ root: workspaceDir, trash: () => {} });
+  await workspace.init();
+  const skillStore = new SkillStore({ globalDir: path.join(dir, 'global'), store, library: new SkillLibrary({ dir: libraryDir }) });
+  const first = await skillStore.enabled(workspaceDir);
+  assert.equal(first.length, 61);
+  assert.equal((await skillStore.enabled(workspaceDir))[0], first[0], 'the library is prepared once, not for every message');
+  const tools = new ToolRunner({ workspace, store, onChanged: () => {}, skills: skillStore });
+  const conversations = new ConversationStore(path.join(dir, 'conversations'));
+  await conversations.init();
+  const conversation = await conversations.create();
+  const calls = [];
+  let done;
+  const finished = new Promise((resolve) => { done = resolve; });
+  const agent = new AgentRunner({
+    store,
+    workspace,
+    models: { resolveActive: async () => ({ id: 'mock', name: 'Mock', family: 'Test' }) },
+    conversations,
+    toolRunner: tools,
+    llama: {
+      async ensureServer() {},
+      async *streamChat(request) {
+        calls.push(request);
+        yield { type: 'text', text: calls.length === 1 ? '{"skill":"pizzeria-website"}' : 'Ecco fatto.' };
+      },
+    },
+    send: (_channel, payload) => { if (payload?.type === 'assistant-end') done(payload.message); },
+  });
+  await agent.send(conversation.id, 'crea un sito web per la mia pizzeria');
+  await finished;
+  assert.match(calls[0].messages.at(-1).content, /does one of these skills fit this task\?\n- pizzeria-website:/, 'the Italian request is asked about its skill');
+  const request = calls[1].messages.at(-1).content;
+  assert.ok(request.startsWith('crea un sito web per la mia pizzeria'), 'the model gets the user\'s own words');
+  const loaded = request.match(/<skill name="pizzeria-website">\n([\s\S]*)\n<\/skill>/)[1];
+  assert.match(loaded, /## Steps\n1\. Create index\.html with the menu\./);
+  assert.match(loaded, /\[Left out: .*\(lines \d+-\d+\)/);
+  assert.match(loaded, /"start_line":\d+,"max_lines":\d+/);
+  assert.doesNotMatch(loaded, /truncated\]/, 'fitted, not cut at a fixed point');
+  assert.ok(loaded.length <= 4423, `${loaded.length} characters for an 8k context`);
+  console.log('Italian and Spanish requests, skill order, and long skills fitted by section: OK');
+}
+
+function testPromptSize() {
+  const prompt = (settings, model = { name: 'Mock' }) => systemPrompt({ workspaceSummary: 'W', settings, model, skills: [] });
+  // With the settings Uma starts with, the model reads about the tools it has and no others.
+  const first = prompt({ allowEdits: true });
+  for (const tool of ['list_files', 'read_file', 'write_file', 'replace_in_file', 'search_files']) assert.match(first, new RegExp(`^\\d+\\. ${tool} `, 'm'), tool);
+  for (const tool of ['run_command', 'web_search', 'fetch_url', 'delete_file', 'look_at_screen', 'look_at_page', 'mouse', 'keyboard', 'click_text']) {
+    assert.doesNotMatch(first, new RegExp(`^\\d+\\. ${tool} `, 'm'), `${tool} is off, so it is not described`);
+  }
+  assert.match(first, /terminal commands are NOT allowed/, 'what is off is still named, with where to turn it on');
+  assert.match(first, /Settings → Agent permissions/);
+  // Each permission adds its own tools and rules.
+  const everything = prompt({ allowEdits: true, allowDelete: true, allowShell: true, allowInternet: true, allowScreen: true, allowInput: true }, { name: 'Mock', mmproj: {} });
+  for (const tool of ['run_command', 'web_search', 'fetch_url', 'delete_file', 'look_at_screen', 'look_at_page', 'mouse', 'keyboard', 'click_text', 'remember']) {
+    assert.match(everything, new RegExp(`^\\d+\\. ${tool} `, 'm'), tool);
+  }
+  assert.doesNotMatch(prompt({ allowEdits: true, allowInput: true }), /^\d+\. mouse /m, 'no clicking by position for a model that cannot see');
+  assert.doesNotMatch(prompt({}), /^\d+\. write_file /m);
+  // The size is kept: every line here is a line less of the user's files in a small context.
+  // (6,600 until save_document, the tool that makes PDF and Word files, was added.)
+  assert.ok(first.length < 6900, `the starting prompt grew to ${first.length} characters`);
+  assert.ok(everything.length < 11900, `the full prompt grew to ${everything.length} characters`);
+  console.log(`the fixed prompt describes only what is allowed (${first.length} characters to start with, ${everything.length} with everything on): OK`);
+}
+
+// Seeing as an assistant that works by screenshots does: a closer look at one part of the screen
+// (zoom), and a new picture of the screen back with every mouse or keyboard action. The screen and
+// the mouse are stand-ins here; the real cut-out is checked in scripts/ui-zoom-test.cjs.
+async function testSeeing() {
+  const dir = path.join(root, 'seeing');
+  await fsp.rm(dir, { recursive: true, force: true });
+  const store = new Store(path.join(dir, 'data'));
+  await store.init();
+  await store.updateSettings({ allowEdits: true, allowScreen: true, allowInput: true });
+  const workspaceDir = path.join(dir, 'workspace');
+  await ensureDir(workspaceDir);
+  const workspace = new Workspace({ root: workspaceDir, trash: () => {} });
+  await workspace.init();
+  const shots = [];
+  const capture = async (options = {}) => {
+    shots.push(options);
+    const zoom = options.zoom ? options.zoom.map(Number) : null;
+    return {
+      name: zoom ? 'part of the whole screen' : options.window ? `the window "${options.window}"` : 'the whole screen',
+      width: 1280, height: 720, image: 'data:image/jpeg;base64,AAAA', thumbnail: 'data:image/jpeg;base64,BBBB',
+      ...(zoom ? { zoom: { left: zoom[0], top: zoom[1], right: zoom[2], bottom: zoom[3], times: 2.1 } } : {}),
+    };
+  };
+  const acts = [];
+  const input = {
+    act: async (action, args) => { acts.push([action, args]); return `${action} done`; },
+    clickItem: async (text) => ({ name: text, kind: 'Button', pictureX: 10, pictureY: 20 }),
+    findItems: async () => [],
+  };
+  const tools = new ToolRunner({ workspace, store, onChanged: () => {}, capture, input });
+
+  // A closer look: the part is asked for by its corners in the picture the model was given.
+  let result = await tools.run('look_at_screen', { zoom: [300, 200, 900, 600] });
+  assert.equal(result.ok, true, result.output);
+  assert.deepEqual(shots.at(-1).zoom, [300, 200, 900, 600]);
+  assert.match(result.output, /closer picture of the part from \(300, 200\) to \(900, 600\) of the whole screen is attached, about 2\.1 times larger/);
+  assert.match(result.output, /positions in it are not mouse positions[\s\S]*300 \+ x\/2\.1 and 200 \+ y\/2\.1/);
+  assert.equal(result.data.zoomed, true);
+  assert.equal(result.data.image, 'data:image/jpeg;base64,AAAA');
+  // Small models write it in other shapes too.
+  await tools.run('look_at_screen', { zoom: '300, 200, 900, 600' });
+  assert.deepEqual(shots.at(-1).zoom, ['300', '200', '900', '600']);
+  // The corners are positions in the picture last looked at, so that picture is the one cut from,
+  // whatever window is named with them (a real model named a window with the whole screen's positions).
+  await tools.run('look_at_screen', {});
+  await tools.run('look_at_screen', { zoom: { left: 1, top: 2, right: 300, bottom: 400 }, window: 'Brave' });
+  assert.deepEqual([shots.at(-1).zoom, shots.at(-1).window], [[1, 2, 300, 400], ''], 'the last look was at the whole screen');
+  await tools.run('look_at_screen', { window: 'Brave' });
+  await tools.run('look_at_screen', { zoom: [1, 2, 300, 400] });
+  assert.equal(shots.at(-1).window, 'Brave', 'after a look at a window, a closer look is of that window');
+  result = await tools.run('look_at_screen', {});
+  assert.equal(shots.at(-1).zoom, null);
+  assert.match(result.output, /A screenshot of the whole screen \(1280×720\) is attached/);
+  assert.match(toolDocsFor(['look_at_screen']), /"zoom":\[left,top,right,bottom\]/);
+  assert.deepEqual(toolCallSchema(['look_at_screen']).anyOf[0].properties.arguments.properties.zoom, { type: 'array', items: { type: 'integer' }, minItems: 4, maxItems: 4 });
+
+  // Every action comes back with what the screen shows now, when the model can see.
+  let before = shots.length;
+  result = await tools.run('mouse', { action: 'click', x: 5, y: 5 }, { picture: true });
+  assert.equal(result.ok, true, result.output);
+  assert.equal(shots.length, before + 1);
+  assert.deepEqual(shots.at(-1), { width: 640 }, 'the whole screen, small');
+  assert.equal(result.data.screenAfter, true);
+  assert.equal(result.data.image, 'data:image/jpeg;base64,AAAA');
+  assert.match(result.output, /A small picture of the whole screen as it is now is attached: check in it[\s\S]*too small to read text in or to take mouse positions from/);
+  assert.doesNotMatch(result.output, /look_at_screen to check/);
+  for (const [name, args] of [['keyboard', { text: 'hi', keys: 'enter' }], ['focus_window', { window: 'Brave' }], ['click_text', { text: 'OK' }], ['wait', { seconds: 0.2 }]]) {
+    result = await tools.run(name, args, { picture: true });
+    assert.equal(result.data.screenAfter, true, name);
+  }
+  // A model that cannot see is told to check another way, and no picture is taken for it.
+  before = shots.length;
+  result = await tools.run('mouse', { action: 'click', x: 5, y: 5 }, { picture: false });
+  assert.equal(shots.length, before);
+  assert.equal(result.data.screenAfter, undefined);
+  assert.match(result.output, /Look at the whole screen with look_at_screen to check the result/);
+  // Nor when seeing the screen is turned off.
+  await store.updateSettings({ allowScreen: false });
+  result = await tools.run('keyboard', { text: 'hi' }, { picture: true });
+  assert.equal(shots.length, before);
+  assert.equal(result.data.screenAfter, undefined);
+  await store.updateSettings({ allowScreen: true });
+
+  // Through the agent, with a model that has a vision file: the picture travels with the action's
+  // result, and the next click needs no look in between. (A claim that something is now playing or
+  // opened is still checked with a look of its own: test-agent.cjs.)
+  const conversations = new ConversationStore(path.join(dir, 'conversations'));
+  await conversations.init();
+  const conversation = await conversations.create();
+  const calls = [];
+  const script = [
+    '```tool\n{"name":"look_at_screen","arguments":{}}\n```',
+    '```tool\n{"name":"mouse","arguments":{"action":"click","x":100,"y":100}}\n```',
+    '```tool\n{"name":"click_text","arguments":{"text":"OK"}}\n```',
+    '```tool\n{"name":"mouse","arguments":{"action":"click","x":300,"y":200}}\n```',
+    'The OK button is pressed and its window is gone.',
+  ];
+  let done;
+  const finished = new Promise((resolve) => { done = resolve; });
+  const agent = new AgentRunner({
+    store, workspace, conversations, toolRunner: tools,
+    models: { resolveActive: async () => ({ id: 'mock', name: 'Mock', family: 'Test', mmproj: 'vision.gguf' }) },
+    llama: {
+      async ensureServer() {},
+      async *streamChat(request) {
+        // Counted now: a picture is taken off its message once it has been sent.
+        calls.push({ pictures: request.messages.filter((item) => Array.isArray(item.content) && item.content.some((part) => part.type === 'image_url')).length });
+        yield { type: 'text', text: script[Math.min(calls.length - 1, script.length - 1)] };
+        yield { type: 'finish', reason: 'stop' };
+      },
+    },
+    send: (_channel, payload) => { if (payload?.type === 'assistant-end') done(payload.message); },
+  });
+  await agent.send(conversation.id, 'click the OK button in the window that is open');
+  const message = await finished;
+  const blocks = message.blocks.filter((block) => block.type === 'tool');
+  // A click by name needs no look in between; a click by position does, at full size (the small picture is no map).
+  assert.deepEqual(blocks.map((block) => [block.name, block.status]), [['look_at_screen', 'done'], ['mouse', 'done'], ['click_text', 'done'], ['mouse', 'error']]);
+  assert.match(blocks[3].error, /have not looked at the whole screen since the last action/);
+  assert.equal(blocks[1].sawScreen, true);
+  assert.equal(blocks[1].image, 'data:image/jpeg;base64,BBBB', 'the user sees the small picture too');
+  const pictured = calls.map((request) => request.pictures);
+  // The small pictures stay with their steps (taking one out makes the engine read everything again).
+  assert.deepEqual(pictured.slice(0, 4), [0, 1, 1, 2], `the picture goes to the model with the result, and stays (${pictured.join()})`);
+  assert.match(message.content, /The OK button is pressed/);
+  console.log('zoom, and a picture of the screen after each action: OK');
+}
+
+// PDF and Word documents made by Uma itself (save_document): Markdown read into parts, a .docx
+// written from them and read back with the reader Uma uses for attachments, and the tool's rules.
+// (The PDF needs the app's own window: scripts/ui-document-test.cjs, part of npm run test:ui.)
+async function testDocuments() {
+  const { parseMarkdown, toHtml, titleOf } = require('../electron/lib/markdown.cjs');
+  const { toDocx } = require('../electron/lib/docx.cjs');
+  const { extractDocument, readZipEntry } = require('../electron/lib/attachments.cjs');
+  const text = [
+    '# Quarterly report', '', 'An **introduction** with *italic*, `code`, a [link](https://example.com) and snake_case_name.', 'Second line of the same paragraph.', '',
+    '## Results', '', '1. First numbered item', '2. Second numbered item', '   - a bullet under it', '   - another & one <tag>', '3. Third', '', '- Apples', '- Pears', '',
+    '| Month | Sales |', '| --- | ---: |', '| January | 1,200 |', '| February | **950** |', '', '> A quoted line.', '', '```js', 'function add(a, b) {', '  return a + b;', '}', '```', '', '---', '', 'Città, naïve, 日本語.',
+  ].join('\n');
+  const parts = parseMarkdown(text);
+  const shape = (part) => `${part.type}${part.level || ''}${part.items ? `(${part.items.map((item) => `${item.level}${item.ordered ? 'n' : 'b'}`).join(',')})` : ''}${part.rows ? `(${part.header.length}x${part.rows.length})` : ''}`;
+  assert.deepEqual(parts.map(shape), ['heading1', 'paragraph', 'heading2', 'list(0n,0n,1b,1b,0n)', 'list(0b,0b)', 'table(2x2)', 'quote', 'code', 'rule', 'paragraph']);
+  assert.equal(titleOf(parts), 'Quarterly report');
+  const intro = parts[1].runs;
+  assert.deepEqual(intro.filter((run) => run.bold || run.italic || run.code || run.link).map((run) => [run.text, run.bold ? 'b' : run.italic ? 'i' : run.code ? 'c' : run.link]), [['introduction', 'b'], ['italic', 'i'], ['code', 'c'], ['link', 'https://example.com']]);
+  assert.ok(intro.some((run) => run.text.includes('snake_case_name')), 'an underscore inside a word is not emphasis');
+  assert.equal(parts[7].text, 'function add(a, b) {\n  return a + b;\n}', 'code keeps its lines and spaces');
+  // The page a PDF is printed from: nothing of the text can break out of it.
+  const html = toHtml(parts);
+  assert.match(html, /<h1>Quarterly report<\/h1>/);
+  assert.match(html, /<ol><li>First numbered item<\/li><li>Second numbered item<ul><li>a bullet under it<\/li><li>another &amp; one &lt;tag&gt;<\/li><\/ul><\/li><li>Third<\/li><\/ol>/);
+  assert.match(html, /<table><thead><tr><th>Month<\/th><th>Sales<\/th><\/tr><\/thead>/);
+  assert.match(toHtml(parseMarkdown('A [bad](javascript:run) link and <script>x</script>.')), /A bad link and &lt;script&gt;x&lt;\/script&gt;\./, 'no script, and no link that runs one');
+
+  // The Word file: a zip whose parts are XML, with every word of the text in it once.
+  const docx = toDocx(parts);
+  assert.equal(docx.subarray(0, 2).toString('latin1'), 'PK');
+  for (const name of ['[Content_Types].xml', '_rels/.rels', 'word/document.xml', 'word/styles.xml', 'word/numbering.xml', 'word/_rels/document.xml.rels', 'docProps/core.xml']) {
+    assert.match(readZipEntry(docx, name).toString('utf8'), /^<\?xml version="1\.0"/, name);
+  }
+  const body = readZipEntry(docx, 'word/document.xml').toString('utf8');
+  assert.match(body, /<w:pStyle w:val="Heading1"\/><\/w:pPr><w:r><w:t xml:space="preserve">Quarterly report<\/w:t>/);
+  assert.match(body, /<w:rPr><w:b\/><w:bCs\/><\/w:rPr><w:t xml:space="preserve">introduction<\/w:t>/);
+  assert.match(body, /another &amp; one &lt;tag&gt;/);
+  assert.equal((body.match(/<w:tbl>/g) || []).length, 1);
+  assert.match(readZipEntry(docx, 'word/_rels/document.xml.rels').toString('utf8'), /Target="https:\/\/example\.com" TargetMode="External"/);
+  // Each numbered list has a number of its own, so the second one starts at 1 again.
+  assert.equal((readZipEntry(toDocx(parseMarkdown('1. a\n2. b\n\ntext\n\n1. c\n2. d')), 'word/numbering.xml').toString('utf8').match(/<w:num w:numId=/g) || []).length, 3);
+  const back = (await extractDocument('report.docx', docx)).text;
+  for (const words of ['Quarterly report', 'An introduction with italic, code, a link and snake_case_name. Second line of the same paragraph.', 'First numbered item', 'another & one <tag>', 'February', '950', 'A quoted line.', 'function add(a, b) {', 'Città, naïve, 日本語.']) {
+    assert.ok(back.includes(words), `the Word file holds "${words}"`);
+  }
+  assert.equal(toDocx(parts).equals(docx), true, 'the same text gives the same file');
+
+  // The tool. A Word file needs nothing but Uma; a PDF needs the app's window, which is not here.
+  const dir = path.join(root, 'documents');
+  await fsp.rm(dir, { recursive: true, force: true });
+  const store = new Store(path.join(dir, 'data'));
+  await store.init();
+  await store.updateSettings({ allowEdits: true });
+  const workspaceDir = path.join(dir, 'workspace');
+  await ensureDir(workspaceDir);
+  const workspace = new Workspace({ root: workspaceDir, trash: () => {} });
+  await workspace.init();
+  const printed = [];
+  const tools = new ToolRunner({ workspace, store, onChanged: () => {}, printPdf: async (page) => { printed.push(page); return Buffer.from('%PDF-1.4\n1 0 obj << /Type /Pages >> endobj\n2 0 obj << /Type /Page >> endobj\n3 0 obj << /Type /Page >> endobj\n%%EOF'); } });
+  let result = await tools.run('save_document', { path: 'out/report.docx', content: text });
+  assert.equal(result.ok, true, result.output);
+  assert.match(result.output, /Made out\/report\.docx: a real Word document/);
+  assert.ok((await extractDocument('report.docx', await fsp.readFile(path.join(workspaceDir, 'out', 'report.docx')))).text.includes('Quarterly report'));
+  // From a file already written (a long document is written in parts first).
+  await fsp.writeFile(path.join(workspaceDir, 'notes.md'), '# Notes\n\n- one\n- two\n');
+  result = await tools.run('save_document', { path: 'notes.docx', from: 'notes.md' });
+  assert.equal(result.ok, true, result.output);
+  assert.ok((await extractDocument('notes.docx', await fsp.readFile(path.join(workspaceDir, 'notes.docx')))).text.includes('Notes\none\ntwo'));
+  // A PDF: the Markdown goes to the printer as a page; an HTML file of the project goes as it is.
+  result = await tools.run('save_document', { path: 'report.pdf', content: text });
+  assert.equal(result.ok, true, result.output);
+  assert.match(result.output, /Made report\.pdf: a real PDF of 2 pages/);
+  assert.match(printed[0].html, /<h1>Quarterly report<\/h1>/);
+  assert.equal((await fsp.readFile(path.join(workspaceDir, 'report.pdf'))).subarray(0, 5).toString('latin1'), '%PDF-');
+  await fsp.writeFile(path.join(workspaceDir, 'page.html'), '<!doctype html><html><body><h1>Page</h1></body></html>');
+  result = await tools.run('save_document', { path: 'page.pdf', from: 'page.html' });
+  assert.equal(printed[1].file, path.join(workspaceDir, 'page.html'));
+  // What it refuses, each with the way that works.
+  assert.match((await tools.run('save_document', { path: 'report.txt', content: text })).output, /makes PDF \(\.pdf\) and Word \(\.docx\) files[\s\S]*use write_file/);
+  assert.match((await tools.run('save_document', { path: 'report.docx' })).output, /needs the text of the document/);
+  assert.match((await tools.run('save_document', { path: 'page.docx', from: 'page.html' })).output, /made from Markdown, not from HTML/);
+  assert.match((await tools.run('save_document', { path: '../outside.docx', content: text })).output, /outside the chosen workspace/);
+  assert.match((await new ToolRunner({ workspace, store, onChanged: () => {} }).run('save_document', { path: 'x.pdf', content: text })).output, /PDF files cannot be made here/);
+  // write_file still does not save text under these names, and now says what does.
+  for (const name of ['report.pdf', 'report.docx']) {
+    result = await tools.run('write_file', { path: name, content: text });
+    assert.equal(result.ok, false);
+    assert.match(result.output, /Make it with save_document instead/);
+  }
+  // Off with file edits, like every tool that writes.
+  await store.updateSettings({ allowEdits: false });
+  assert.match((await tools.run('save_document', { path: 'no.docx', content: text })).output, /File editing is turned off/);
+  assert.equal(allowedTools(store.getSettings()).includes('save_document'), false);
+  await store.updateSettings({ allowEdits: true });
+  assert.equal(allowedTools(store.getSettings()).includes('save_document'), true);
+  // "make a PDF about cats" is work on files, as "make a page" is: the tool is offered for it.
+  for (const request of ['make a PDF about cats', 'create a Word document with my CV', 'write a report and save it as report.docx', 'crea un documento Word sul mio progetto']) {
+    assert.equal(Boolean(classifyTask(englishGist(request)).wantsEdit), true, request);
+  }
+  console.log('PDF and Word documents from Markdown: OK');
+}
+
+// What a real 9B model did in the task runs of scripts/e2e-tasks.cjs, and what Uma now does about it.
+async function testRealModelFixes() {
+  const dir = path.join(root, 'real-model');
+  await fsp.rm(dir, { recursive: true, force: true });
+  const store = new Store(path.join(dir, 'data'));
+  await store.init();
+  await store.updateSettings({ allowEdits: true });
+  const workspaceDir = path.join(dir, 'workspace');
+  await ensureDir(workspaceDir);
+  await fsp.writeFile(path.join(workspaceDir, 'calc.js'), 'module.exports = { add: (a, b) => a + b };\n');
+  const workspace = new Workspace({ root: workspaceDir, trash: () => {} });
+  await workspace.init();
+  const tools = new ToolRunner({ workspace, store, onChanged: () => {} });
+  const conversations = new ConversationStore(path.join(dir, 'conversations'));
+  await conversations.init();
+  // Each scripted reply is its text, or [text, why it ended].
+  const chat = async (script, text) => {
+    const conversation = await conversations.create();
+    const calls = [];
+    let done;
+    const finished = new Promise((resolve) => { done = resolve; });
+    const agent = new AgentRunner({
+      store,
+      workspace,
+      models: { resolveActive: async () => ({ id: 'mock', name: 'Mock', family: 'Test' }) },
+      conversations,
+      toolRunner: tools,
+      llama: {
+        async ensureServer() {},
+        async *streamChat(request) {
+          calls.push(request);
+          const [reply, reason] = [].concat(script[Math.min(calls.length - 1, script.length - 1)]);
+          yield { type: 'text', text: reply };
+          yield { type: 'finish', reason: reason || 'stop' };
+        },
+      },
+      send: (_channel, payload) => { if (payload?.type === 'assistant-end') done(payload.message); },
+    });
+    await agent.send(conversation.id, text);
+    return { message: await finished, calls };
+  };
+  const toolBlocks = (message) => message.blocks.filter((block) => block.type === 'tool');
+
+  // Small talk that runs to the length limit gets one more reply to finish, not five: a joke that
+  // never ended had filled three full replies.
+  const endless = ['A man walks into a bar, and then another man walks in after him, and', 'length'];
+  let run = await chat([endless, ['and then one more, and', 'length'], ['and more', 'length'], ['and more', 'length']], 'tell me a joke');
+  assert.equal(run.calls.length, 2, 'one continuation for small talk');
+  assert.match(run.calls[1].messages.at(-1).content, /Finish what you were writing in a few sentences/);
+  assert.match(run.message.content, /reached its length limit and stops there\. Say “continue”/);
+  // An answer that ends by itself gets no such note.
+  run = await chat(['Why did the chicken cross the road? To get to the other side.'], 'tell me a joke');
+  assert.equal(run.calls.length, 1);
+  assert.doesNotMatch(run.message.content, /length limit/);
+  // Work on the project keeps its several continuations.
+  run = await chat([['Here is the first part of the explanation of calc.js, which', 'length'], ['goes on, and', 'length'], ['on, and', 'length'], 'ends here.'], 'explain this project in detail');
+  assert.ok(run.calls.length >= 4, `work is continued more than once (${run.calls.length} replies)`);
+
+  // With no terminal, a model that wants to run what it wrote writes the same file again and again
+  // ("Now I run the tests:"). The second write is refused, and it is told what to tell the user.
+  const test = (extra) => `const { add } = require('./calc');\nconst assert = require('node:assert');\nassert.equal(add(1, 2), 3);\nassert.equal(add(0, 0), 0);\nassert.equal(add(-1, 1), 0);\nconsole.log('all tests passed');${extra}\n`;
+  const write = (content) => `\`\`\`tool\n${JSON.stringify({ name: 'write_file', arguments: { path: 'calc.test.js', content } })}\n\`\`\``;
+  run = await chat([
+    `I write the tests.\n${write(test(''))}`,
+    `Now I run the tests:\n${write(`${test('')}\n`)}`,
+    'I created calc.test.js. Run it with: node calc.test.js',
+  ], 'write the tests for calc.js');
+  assert.deepEqual(toolBlocks(run.message).map((block) => [block.name, block.status]), [['write_file', 'done'], ['write_file', 'error']]);
+  const refusal = run.calls[2].messages.at(-1).content;
+  assert.match(refusal, /Not written again: calc\.test\.js already holds this text/);
+  assert.match(refusal, /terminal access is off, so nothing can be run from here/);
+  assert.match(refusal, /give the exact command they can run themselves/);
+  assert.equal(await fsp.readFile(path.join(workspaceDir, 'calc.test.js'), 'utf8'), test(''), 'the file is as it was first written');
+  // A real second version of the file is written.
+  run = await chat([
+    write(test('')),
+    write('const { add } = require(\'./calc\');\nconst test = require(\'node:test\');\nconst assert = require(\'node:assert\');\ntest(\'adds\', () => assert.equal(add(1, 2), 3));\ntest(\'adds zero\', () => assert.equal(add(0, 0), 0));\ntest(\'adds negatives\', () => assert.equal(add(-1, 1), 0));\n'),
+    'Rewrote the tests with node:test.',
+  ], 'write the tests for calc.js');
+  assert.deepEqual(toolBlocks(run.message).map((block) => block.status), ['done', 'done']);
+  // With the terminal on, the refusal points at run_command instead.
+  await store.updateSettings({ allowShell: true });
+  run = await chat([write(test('')), write(test('')), 'Done.'], 'write the tests for calc.js');
+  assert.match(run.calls[2].messages.at(-1).content, /Not written again[\s\S]*call run_command/);
+  assert.doesNotMatch(run.calls[2].messages.at(-1).content, /terminal access is off/);
+
+  // A reply with a tool call that cannot be read, then one that can: the second runs, and the first
+  // is not shown to the user as if it were the answer (a raw ```tool block with half a web page).
+  const fence = '```';
+  const unreadable = `${fence}tool\n{"name":"write_file","arguments":{"path":"index.html","content":"<div class="card">hello</div>\n${fence}`;
+  const readable = `${fence}tool\n{"name":"list_files","arguments":{"path":"."}}\n${fence}`;
+  for (const first of [unreadable, `${fence}tool\n{"name":"write_file","arguments":{"path":"index.html","content":"<!DOCTYPE html>\\n<html>`]) {
+    const call = extractToolCall(`I will make the page.\n${first}\n${readable}`);
+    assert.equal(call.name, 'list_files');
+    assert.equal(call.cleanText, 'I will make the page.');
+  }
+  assert.equal(extractToolCall(`Listing the folder first.\n${readable}`).cleanText, 'Listing the folder first.');
+  await store.updateSettings({ allowShell: false });
+  run = await chat([`I will make the page.\n${unreadable}\n${readable}`, 'The folder holds calc.js and its test.'], 'list the files of this project');
+  assert.deepEqual(toolBlocks(run.message).map((block) => block.name), ['list_files']);
+  assert.doesNotMatch(run.message.content, /```tool|write_file|"arguments"/, 'no raw tool call in the answer');
+  assert.doesNotMatch(run.message.blocks.filter((block) => block.type === 'text').map((block) => block.text).join('\n'), /```tool|"arguments"/);
+  assert.match(run.message.content, /The folder holds calc\.js/);
+
+  // A file longer than one reply: the call is cut off in the middle of its content. What arrived is
+  // read out of the unfinished call.
+  const cut = (json) => `${fence}tool\n${json}`;
+  let partial = cutOffWrite(`I write the page.\n${cut('{"name":"write_file","arguments":{"path":"index.html","content":"<!DOCTYPE html>\\n<p class=\\"a\\">caf\\u00e8</p>\\n<div>half a li')}`);
+  assert.deepEqual(partial, { name: 'write_file', path: 'index.html', content: '<!DOCTYPE html>\n<p class="a">cafè</p>\n<div>half a li', closed: false, cleanText: 'I write the page.' });
+  // Cut in the middle of an escape: the half escape is left out. Real line breaks are taken as they are.
+  assert.equal(cutOffWrite('{"name":"append_file","arguments":{"path":"app.js","content":"line one\\nline two\\').content, 'line one\nline two');
+  assert.equal(cutOffWrite(cut('{"name":"write_file","arguments":{"path":"a.css","content":"body {\n  color: red;\n}\n.card {')).content, 'body {\n  color: red;\n}\n.card {');
+  // The whole content arrived and only the end of the call is missing.
+  partial = cutOffWrite(cut('{"name":"write_file","arguments":{"path":"a.txt","content":"all of it\\n"'));
+  assert.deepEqual([partial.content, partial.closed], ['all of it\n', true]);
+  // Nothing to save: the path comes after the content, another tool, or no call at all.
+  assert.equal(cutOffWrite('{"name":"write_file","arguments":{"content":"x\\ny","path":"a.txt"'), null);
+  assert.equal(cutOffWrite(cut('{"name":"read_file","arguments":{"path":"a.txt"')), null);
+  assert.equal(cutOffWrite('Just an answer.'), null);
+
+  // Through the agent: the part that arrived is saved up to its last whole line, the model is told
+  // where the file stops, and it goes on with append_file. Before, it was asked for the whole call
+  // again, sent the same three times, and the task ended with an error and no file.
+  const page = Array.from({ length: 60 }, (_, index) => `<p>line ${index + 1} of the page</p>`);
+  const callWith = (name, lines, { whole = true } = {}) => {
+    const json = JSON.stringify({ name, arguments: { path: 'page.html', content: `${lines.join('\n')}\n` } });
+    return `${fence}tool\n${whole ? `${json}\n${fence}` : `${json.slice(0, json.lastIndexOf('\\n'))}\\n<p>half a li`}`;
+  };
+  const pageFile = path.join(workspaceDir, 'page.html');
+  run = await chat([
+    [`I write the page.\n${callWith('write_file', page.slice(0, 40), { whole: false })}`, 'length'],
+    callWith('append_file', page.slice(40)),
+    'The page is written.',
+  ], 'make a web page called page.html with sixty lines');
+  assert.deepEqual(toolBlocks(run.message).map((block) => [block.name, block.status]), [['write_file', 'done'], ['append_file', 'done']]);
+  assert.equal(await fsp.readFile(pageFile, 'utf8'), `${page.join('\n')}\n`, 'the file is whole, with no line twice and no half line');
+  const told = run.calls[1].messages.at(-1).content;
+  assert.match(told, /cut off: only its first 40 lines were saved/);
+  assert.match(told, /page\.html now ends with this line:\n<p>line 40 of the page<\/p>\nGo on now with append_file/);
+  assert.equal(run.message.status, 'done');
+  assert.doesNotMatch(run.message.content, /```tool|"arguments"/);
+  // Started over from the first line and cut off again: the saved part stays, and it is told to append.
+  await fsp.rm(pageFile, { force: true });
+  run = await chat([
+    [callWith('write_file', page.slice(0, 40), { whole: false }), 'length'],
+    [callWith('write_file', page.slice(0, 38), { whole: false }), 'length'],
+    callWith('append_file', page.slice(40)),
+    'The page is written.',
+  ], 'make a web page called page.html with sixty lines');
+  assert.deepEqual(toolBlocks(run.message).map((block) => [block.name, block.status]), [['write_file', 'done'], ['write_file', 'error'], ['append_file', 'done']]);
+  assert.match(run.calls[2].messages.at(-1).content, /started page\.html from its first line again[\s\S]*ends with this line:\n<p>line 40 of the page<\/p>\nCall append_file/);
+  assert.equal(await fsp.readFile(pageFile, 'utf8'), `${page.join('\n')}\n`);
+  // An append that is cut off is saved the same way.
+  await fsp.rm(pageFile, { force: true });
+  run = await chat([
+    [callWith('write_file', page.slice(0, 20), { whole: false }), 'length'],
+    [callWith('append_file', page.slice(20, 45), { whole: false }), 'length'],
+    callWith('append_file', page.slice(45)),
+    'The page is written.',
+  ], 'make a web page called page.html with sixty lines');
+  assert.equal(await fsp.readFile(pageFile, 'utf8'), `${page.join('\n')}\n`);
+  assert.match(run.calls[2].messages.at(-1).content, /only its first 25 lines were saved[\s\S]*<p>line 45 of the page<\/p>/);
+  // A model going in circles inside the file (a real one wrote the same questions ten times, part
+  // after part, to 57,000 characters): the part is saved only up to where it starts repeating, the
+  // model is told to close the file, and if it goes on the same way nothing more is written.
+  await fsp.rm(pageFile, { force: true });
+  // Lines long enough to be content: a short line said twice (a closing tag) means nothing.
+  const wide = page.map((line) => line.replace('</p>', ', with enough words to be a line of real text</p>'));
+  run = await chat([
+    [callWith('write_file', wide.slice(0, 40), { whole: false }), 'length'],
+    [callWith('append_file', [...wide.slice(40, 50), ...wide.slice(5, 35)], { whole: false }), 'length'],
+    [callWith('append_file', wide.slice(2, 30), { whole: false }), 'length'],
+    'The page is saved, but its ending may be incomplete.',
+  ], 'make a web page called page.html with sixty lines');
+  assert.deepEqual(toolBlocks(run.message).map((block) => [block.name, block.status]), [['write_file', 'done'], ['append_file', 'done'], ['append_file', 'error']]);
+  assert.equal(await fsp.readFile(pageFile, 'utf8'), `${wide.slice(0, 50).join('\n')}\n`, 'what was new is saved, what was said again is not');
+  assert.match(run.calls[2].messages.at(-1).content, /Only the first 10 lines of this call were saved: after them it repeated lines that page\.html already holds/);
+  assert.match(run.message.content, /kept writing the same lines into page\.html again and again/);
+  assert.ok(run.calls.length <= 4, `the turn ends instead of going on (${run.calls.length} replies)`);
+  // A model that stops after a part that was cut off, and says the file is written: it is told the
+  // file is not finished, and finishes it.
+  await fsp.rm(pageFile, { force: true });
+  run = await chat([
+    [callWith('write_file', wide.slice(0, 40), { whole: false }), 'length'],
+    'The page is written, with all sixty lines.',
+    callWith('append_file', wide.slice(40)),
+    'Now the page is complete.',
+  ], 'make a web page called page.html with sixty lines');
+  assert.match(run.calls[2].messages.at(-1).content, /page\.html is not finished: its last part was cut off[\s\S]*Finish it now with one short append_file/);
+  assert.equal(await fsp.readFile(pageFile, 'utf8'), `${wide.join('\n')}\n`);
+  assert.equal(run.message.blocks.find((block) => block.type === 'text' && /all sixty lines/.test(block.text)).unchecked, 'claimed', 'the early "it is written" is set aside');
+  assert.doesNotMatch(run.message.content, /probably incomplete|all sixty lines/);
+  assert.match(run.message.content, /Now the page is complete\./);
+  // If it still does not finish the file, the user is told that the file is incomplete.
+  await fsp.rm(pageFile, { force: true });
+  run = await chat([
+    [callWith('write_file', wide.slice(0, 40), { whole: false }), 'length'],
+    'The page is written, with all sixty lines.',
+  ], 'make a web page called page.html with sixty lines');
+  assert.match(run.message.content, /page\.html was longer than one reply and was saved in parts, but its last part was cut off[\s\S]*probably incomplete/);
+  assert.equal(await fsp.readFile(pageFile, 'utf8'), `${wide.slice(0, 40).join('\n')}\n`);
+
+  // A model that never ends a file (a real one wrote tests for six minutes, seven parts long): three
+  // cut-off parts are saved, the third with the request to close the file, and the next is not.
+  await fsp.rm(pageFile, { force: true });
+  const noEnd = Array.from({ length: 200 }, (_, index) => `<p>paragraph number ${index + 1}, which says one more thing about the page and its text</p>`);
+  run = await chat([
+    [callWith('write_file', noEnd.slice(0, 40), { whole: false }), 'length'],
+    [callWith('append_file', noEnd.slice(40, 80), { whole: false }), 'length'],
+    [callWith('append_file', noEnd.slice(80, 120), { whole: false }), 'length'],
+    [callWith('append_file', noEnd.slice(120, 160), { whole: false }), 'length'],
+    [callWith('append_file', noEnd.slice(160, 200), { whole: false }), 'length'],
+    'The page is saved up to paragraph 120 and is not finished.',
+  ], 'make a web page called page.html with many paragraphs');
+  assert.deepEqual(toolBlocks(run.message).map((block) => block.status), ['done', 'done', 'done', 'error'], 'the fourth cut-off part is not saved, and there is no fifth');
+  assert.equal(await fsp.readFile(pageFile, 'utf8'), `${noEnd.slice(0, 120).join('\n')}\n`);
+  assert.match(run.calls[2].messages.at(-1).content, /Go on now with append_file/);
+  assert.match(run.calls[3].messages.at(-1).content, /no further part that is cut off will be saved\. Close it now: one short append_file/);
+  assert.match(run.message.content, /page\.html was still not finished after 3 full replies of text/);
+  assert.doesNotMatch(run.message.content, /kept repeating the same tool calls|probably incomplete/, 'one note, not three');
+  // A whole part after the third closes the file, as asked.
+  await fsp.rm(pageFile, { force: true });
+  run = await chat([
+    [callWith('write_file', noEnd.slice(0, 40), { whole: false }), 'length'],
+    [callWith('append_file', noEnd.slice(40, 80), { whole: false }), 'length'],
+    [callWith('append_file', noEnd.slice(80, 120), { whole: false }), 'length'],
+    callWith('append_file', ['</body>', '</html>']),
+    'The page is complete.',
+  ], 'make a web page called page.html with many paragraphs');
+  assert.equal(await fsp.readFile(pageFile, 'utf8'), `${[...noEnd.slice(0, 120), '</body>', '</html>'].join('\n')}\n`);
+  assert.doesNotMatch(run.message.content, /not finished|incomplete/);
+
+  // Told which line the file ends with, a model began its next part with that same line: the lines
+  // the two parts share at the join are written once.
+  await fsp.rm(pageFile, { force: true });
+  run = await chat([
+    [callWith('write_file', wide.slice(0, 40), { whole: false }), 'length'],
+    callWith('append_file', wide.slice(38)),
+    'The page is written.',
+  ], 'make a web page called page.html with sixty lines');
+  assert.equal(await fsp.readFile(pageFile, 'utf8'), `${wide.join('\n')}\n`, 'lines 39 and 40 are there once');
+  // Two closing tags, one at the end of a part and one at the start of the next, are two tags.
+  await fsp.rm(pageFile, { force: true });
+  run = await chat([
+    [callWith('write_file', [...wide.slice(0, 40), '</div>'], { whole: false }), 'length'],
+    callWith('append_file', ['</div>', ...wide.slice(40)]),
+    'The page is written.',
+  ], 'make a web page called page.html with sixty lines');
+  assert.equal(await fsp.readFile(pageFile, 'utf8'), `${[...wide.slice(0, 40), '</div>', '</div>', ...wide.slice(40)].join('\n')}\n`);
+  // A few lines said again are ordinary: nothing is cut.
+  await fsp.rm(pageFile, { force: true });
+  run = await chat([
+    [callWith('write_file', wide.slice(0, 30), { whole: false }), 'length'],
+    callWith('append_file', [...wide.slice(30, 58), wide[3], wide[4], wide[58], wide[59]]),
+    'The page is written.',
+  ], 'make a web page called page.html with sixty lines');
+  assert.equal((await fsp.readFile(pageFile, 'utf8')).split('\n').filter(Boolean).length, 62);
+
+  // Too little arrived to be worth saving: the model is asked for a shorter call, as before.
+  await fsp.rm(pageFile, { force: true });
+  run = await chat([
+    [callWith('write_file', page.slice(0, 2), { whole: false }), 'length'],
+    callWith('write_file', page.slice(0, 3)),
+    'Done.',
+  ], 'make a web page called page.html with three lines');
+  assert.match(run.calls[1].messages.at(-1).content, /Your tool call was cut off at the/);
+  assert.equal(await fsp.readFile(pageFile, 'utf8'), `${page.slice(0, 3).join('\n')}\n`);
+
+  // Asked to run a file, a real model began with "Here is the content of test.js:" and thirty lines it
+  // had made up, and they stayed in the answer. A listing of a file that no tool has opened, and that
+  // is not what the file holds, is set aside, and the model does not read it back.
+  await fsp.writeFile(path.join(workspaceDir, 'notes.js'), 'const first = 1;\nconst second = 2;\nconst third = 3;\nconst fourth = 4;\nconst fifth = 5;\nmodule.exports = { first, second, third, fourth, fifth };\n');
+  const madeUp = 'Here is the content of `notes.js`:\n```javascript\nfunction add(a, b) {\n  return a + b;\n}\nfunction subtract(a, b) {\n  return a - b;\n}\nconsole.log(add(2, 3));\n```';
+  const toolCall = (name, args) => `\`\`\`tool\n${JSON.stringify({ name, arguments: args })}\n\`\`\``;
+  run = await chat([`${madeUp}\n${toolCall('read_file', { path: 'calc.js' })}`, 'calc.js adds two numbers.'], 'what does calc.js do?');
+  assert.equal(run.message.blocks.find((block) => block.type === 'text' && /subtract/.test(block.text)).unchecked, 'unseen', 'the invented listing is set aside');
+  assert.doesNotMatch(run.message.content, /subtract/);
+  assert.doesNotMatch(run.calls[1].messages.map((message) => message.content).join('\n'), /subtract/, 'and the model does not work from it');
+  assert.match(run.message.content, /calc\.js adds two numbers\./);
+  // As the whole answer, with no tool: it is told to open the file.
+  run = await chat([madeUp, toolCall('read_file', { path: 'notes.js' }), 'notes.js holds five numbers, first to fifth.'], 'what is in notes.js?');
+  assert.ok(run.calls.some((request) => /You showed a listing of notes\.js[\s\S]*Call read_file on notes\.js now/.test(request.messages.at(-1).content)), 'asked to read the file');
+  assert.doesNotMatch(run.message.content, /subtract/);
+  assert.match(run.message.content, /five numbers/);
+  // What the file really holds may be shown, and so may the output of a command that ran it.
+  run = await chat([`Here is \`notes.js\`:\n\`\`\`javascript\nconst first = 1;\nconst second = 2;\nconst third = 3;\nconst fourth = 4;\nconst fifth = 5;\n\`\`\`\n${toolCall('list_files', { path: '.' })}`, 'That is all of it.'], 'what is in notes.js?');
+  assert.match(run.message.content, /const fourth = 4;/, 'a true listing stays');
+  run = await chat([toolCall('read_file', { path: 'notes.js' }), `Running \`notes.js\` would print:\n\`\`\`\nline one of the output\nline two of the output\nline three of the output\nline four of the output\nline five of the output\n\`\`\`\n${toolCall('list_files', { path: '.' })}`, 'That is all of it.'], 'what is in notes.js?');
+  assert.match(run.message.content, /line four of the output/, 'a file a tool has opened is left alone');
+
+  // The workspace's own full path is the workspace: a model gave it as the folder to run a command
+  // in, and the command was refused. A full path outside it is still refused.
+  assert.equal(await workspace.resolve(path.join(workspaceDir, 'calc.js')), path.join(workspaceDir, 'calc.js'));
+  assert.equal(await workspace.resolve(workspaceDir), workspaceDir);
+  assert.equal(await workspace.resolve(workspaceDir.replace(/\\/g, '/')), workspaceDir);
+  await assert.rejects(workspace.resolve(path.join(dir, 'data', 'settings.json')), /relative to the workspace/);
+  await assert.rejects(workspace.resolve(path.join(workspaceDir, '..', 'data')), /relative to the workspace/);
+  // So is its own name in front of a path: a page asked for in "workspace" does not land in a new
+  // folder workspace/workspace. A folder of that name that is really there is used.
+  assert.equal(await workspace.resolve('workspace/index.html'), path.join(workspaceDir, 'index.html'));
+  assert.equal(await workspace.resolve('workspace'), path.join(workspaceDir, 'workspace'), 'the name alone can still be made as a folder');
+  await ensureDir(path.join(workspaceDir, 'workspace'));
+  assert.equal(await workspace.resolve('workspace/index.html'), path.join(workspaceDir, 'workspace', 'index.html'));
+  await fsp.rm(path.join(workspaceDir, 'workspace'), { recursive: true });
+
+  // The file pasted into the chat instead of saved. Asked for faq.html, a real model wrote the whole
+  // page into the chat, and then all of it a second time as a tool call, with 8,000 characters of
+  // HTML left in the answer. When it is plain which file the code is, Uma saves it itself.
+  await fsp.rm(pageFile, { force: true });
+  run = await chat([`Here is the page:\n${fence}html\n${wide.slice(0, 20).join('\n')}\n${fence}\nIt has twenty lines.`, 'The page is saved as page.html.'], 'make a web page called page.html with twenty lines');
+  assert.deepEqual(toolBlocks(run.message).map((block) => [block.name, block.status, block.args.path]), [['write_file', 'done', 'page.html']], 'saved by Uma, as the file the request names');
+  assert.equal(await fsp.readFile(pageFile, 'utf8'), `${wide.slice(0, 20).join('\n')}\n`);
+  assert.equal(run.calls.length, 2, 'the reply is not thrown away and written a second time');
+  assert.doesNotMatch(run.message.content, /line 5 of the page/, 'the code is in the file, not in the answer as well');
+  assert.match(run.message.content, /Here is the page:[\s\S]*The page is saved as page\.html\./);
+  // Cut off by the end of the reply, it is the first part of the file, and the model goes on.
+  await fsp.rm(pageFile, { force: true });
+  run = await chat([
+    [`${fence}html\n${wide.slice(0, 40).join('\n')}\n<p>half a li`, 'length'],
+    callWith('append_file', wide.slice(40)),
+    'The page is written.',
+  ], 'make a web page called page.html with sixty lines');
+  assert.equal(await fsp.readFile(pageFile, 'utf8'), `${wide.join('\n')}\n`, 'the pasted part and the rest, each once');
+  assert.match(run.calls[1].messages.at(-1).content, /Go on now with append_file/);
+  assert.doesNotMatch(run.message.content, /line 5 of the page|half a li/);
+  // The same when the reply ends in the middle of the code for another reason (the model stops, or
+  // Uma ends a reply that had begun to repeat itself): what arrived is the first part.
+  await fsp.rm(pageFile, { force: true });
+  run = await chat([
+    `${fence}html\n${wide.slice(0, 30).join('\n')}\n`,
+    callWith('append_file', wide.slice(30)),
+    'The page is written.',
+  ], 'make a web page called page.html with sixty lines');
+  assert.equal(await fsp.readFile(pageFile, 'utf8'), `${wide.join('\n')}\n`);
+  assert.match(run.calls[1].messages.at(-1).content, /Go on now with append_file/);
+  // A whole HTML document with no name anywhere is index.html, as every model names it.
+  run = await chat([`${fence}html\n<!DOCTYPE html>\n<html>\n<body>\n${wide.slice(0, 20).join('\n')}\n</body>\n</html>\n${fence}`, 'The page is saved.'], 'make a web page with twenty lines');
+  assert.deepEqual(toolBlocks(run.message).map((block) => [block.name, block.status, block.args.path]), [['write_file', 'done', 'index.html']]);
+  await fsp.rm(path.join(workspaceDir, 'index.html'), { force: true });
+  // The page, then a short block with the command to open it: the page is still the one file.
+  run = await chat([`${fence}html\n<!DOCTYPE html>\n<html>\n<body>\n${wide.slice(0, 20).join('\n')}\n</body>\n</html>\n${fence}\n\nOpen it with:\n\n${fence}powershell\nStart-Process "index.html"\n${fence}\n`, 'The page is saved.'], 'make a web page with twenty lines');
+  assert.deepEqual(toolBlocks(run.message).map((block) => [block.name, block.status, block.args.path]), [['write_file', 'done', 'index.html']]);
+  assert.match(await fsp.readFile(path.join(workspaceDir, 'index.html'), 'utf8'), /^<!DOCTYPE html>[\s\S]*<\/html>\n$/);
+  assert.doesNotMatch(await fsp.readFile(path.join(workspaceDir, 'index.html'), 'utf8'), /Start-Process/);
+  await fsp.rm(path.join(workspaceDir, 'index.html'), { force: true });
+  // Two long blocks are two files, and which is which is not plain: nothing is saved by Uma.
+  run = await chat([`${fence}html\n${wide.slice(0, 20).join('\n')}\n${fence}\n${fence}css\n${wide.slice(20, 40).join('\n')}\n${fence}`, toolCall('write_file', { path: 'two.html', content: 'x\n' }), 'Saved.'], 'make a web page with twenty lines and its style sheet');
+  assert.equal(toolBlocks(run.message).some((block) => block.args.path === 'index.html'), false);
+  await fsp.rm(path.join(workspaceDir, 'two.html'), { force: true });
+  // The page, then a call that changes nothing (to look at it, before it exists): the page is saved
+  // first. And a whole page is never written over a code file, whatever the model calls it.
+  run = await chat([`${fence}html\n<!DOCTYPE html>\n<html>\n<body>\n${wide.slice(0, 20).join('\n')}\n</body>\n</html>\n${fence}\n${toolCall('list_files', { path: '.' })}`, 'The page is saved as index.html.'], 'make a web page with twenty lines');
+  assert.deepEqual(toolBlocks(run.message).map((block) => [block.name, block.status, block.args.path]), [['write_file', 'done', 'index.html']]);
+  await fsp.rm(path.join(workspaceDir, 'index.html'), { force: true });
+  const pageOverCode = await tools.run('write_file', { path: 'calc.js', content: '<!DOCTYPE html>\n<html><body><h1>Hello</h1></body></html>\n' });
+  assert.equal(pageOverCode.ok, false);
+  assert.match(pageOverCode.output, /whole HTML page, and "calc\.js" is not an HTML file[\s\S]*index\.html/);
+  assert.equal((await tools.run('write_file', { path: 'hello.html', content: '<!DOCTYPE html>\n<html><body><h1>Hello</h1></body></html>\n' })).ok, true);
+  await fsp.rm(path.join(workspaceDir, 'hello.html'), { force: true });
+  // A file that is already there is never replaced this way, and code with no plain name is not
+  // saved under a guessed one: the model is asked to save it, and the paste leaves the answer.
+  const script = Array.from({ length: 20 }, (_, index) => `console.log('number ${index + 1} of twenty, printed on its own line');`);
+  for (const [request, saved] of [['rewrite calc.js so that it prints twenty numbers', 'calc.js'], ['write a script that prints twenty numbers', 'numbers.js']]) {
+    const before = await fsp.readFile(path.join(workspaceDir, 'calc.js'), 'utf8');
+    run = await chat([`${fence}javascript\n${script.join('\n')}\n${fence}`, toolCall('write_file', { path: 'numbers.js', content: `${script.join('\n')}\n` }), `Saved as ${saved}.`], request);
+    assert.ok(run.calls.some((item) => /You pasted the code into chat/.test(item.messages.at(-1).content)), `asked to save it (${request})`);
+    assert.equal(await fsp.readFile(path.join(workspaceDir, 'calc.js'), 'utf8'), before, 'calc.js is not replaced by a paste');
+    assert.doesNotMatch(run.message.content, /number 5 of twenty/, 'the paste does not stay in the answer');
+    await fsp.rm(path.join(workspaceDir, 'numbers.js'), { force: true });
+  }
+
+  // A joke whose story has a click in it is a joke, not a claim to have clicked: a real model's was set
+  // aside, and what it then wrote was nonsense. Asked to click, the same words are still a claim.
+  const story = 'A programmer walks into a bar. "I clicked the button and typed my order," he says, "and the bar crashed."';
+  run = await chat([story, 'something else'], 'tell me a joke');
+  assert.equal(run.calls.length, 1, 'the joke is the answer');
+  assert.match(run.message.content, /I clicked the button/);
+  run = await chat(['I clicked the button and typed your name.', 'I cannot click or type in other programs from here.'], 'click the OK button in the window that is open');
+  assert.ok(run.calls.length > 1, 'a claim to have clicked is still not taken');
+  assert.doesNotMatch(run.message.content, /I clicked the button/);
+
+  // A PDF or Word document longer than one reply: half a document cannot be made, so its text is
+  // kept as a .md file, continued there, and the document is made from that file when it is whole.
+  const docCall = (lines) => {
+    const json = JSON.stringify({ name: 'save_document', arguments: { path: 'guide.docx', content: `${lines.join('\n')}\n` } });
+    return `${fence}tool\n${json.slice(0, json.lastIndexOf('\\n'))}\\nhalf a li`;
+  };
+  run = await chat([
+    [docCall(wide.slice(0, 40)), 'length'],
+    toolCall('append_file', { path: 'guide.md', content: `${wide.slice(40).join('\n')}\n` }),
+    'The guide is ready.',
+    toolCall('save_document', { path: 'guide.docx', from: 'guide.md' }),
+    'The guide is saved as guide.docx.',
+  ], 'make a Word document called guide.docx with sixty lines');
+  assert.deepEqual(toolBlocks(run.message).map((block) => [block.name, block.status, block.args.path]), [['write_file', 'done', 'guide.md'], ['append_file', 'done', 'guide.md'], ['save_document', 'done', 'guide.docx']]);
+  assert.match(run.calls[1].messages.at(-1).content, /the document is not made yet: the first 40 lines of its text are saved as guide\.md[\s\S]*"name":"save_document","arguments":\{"path":"guide\.docx","from":"guide\.md"\}/);
+  assert.match(run.calls[3].messages.at(-1).content, /guide\.docx has not been made yet: only its text is saved, in guide\.md/, 'saying it is ready does not make the document');
+  assert.equal(await fsp.readFile(path.join(workspaceDir, 'guide.md'), 'utf8'), `${wide.join('\n')}\n`);
+  assert.equal((await fsp.readFile(path.join(workspaceDir, 'guide.docx'))).subarray(0, 2).toString('latin1'), 'PK');
+  assert.doesNotMatch(run.message.content, /The guide is ready\./);
+  assert.match(run.message.content, /saved as guide\.docx/);
+  await fsp.rm(path.join(workspaceDir, 'guide.md'), { force: true });
+  await fsp.rm(path.join(workspaceDir, 'guide.docx'), { force: true });
+
+  // "The test passes" after a command that failed: a real model wrote "the fix is confirmed, the test
+  // passes" after exit code 1. It is shown the failure and may not say so; after a command that
+  // worked, the same words are the truth.
+  await store.updateSettings({ allowShell: true });
+  const fails = toolCall('run_command', { command: 'node -e "console.error(\'AssertionError: add(2, 3) should be 5\'); process.exit(1)"' });
+  run = await chat([fails, 'The fix is confirmed: the test passes now.', 'The test still fails: add(2, 3) should be 5.'], 'run the test of calc.js');
+  assert.match(run.calls[2].messages.at(-1).content, /the last command you ran failed[\s\S]*AssertionError: add\(2, 3\) should be 5[\s\S]*Do not say that it passes/);
+  assert.doesNotMatch(run.message.content, /the test passes now/);
+  assert.match(run.message.content, /The test still fails/);
+  run = await chat([toolCall('run_command', { command: 'node -e "console.log(\'all tests passed\')"' }), 'The test passes: it printed "all tests passed".'], 'run the test of calc.js');
+  assert.equal(run.calls.length, 2, 'a true "it passes" is taken');
+  assert.match(run.message.content, /The test passes/);
+  await store.updateSettings({ allowShell: false, askBeforeCommands: true });
+
+  // With full PC access, a file goes where the user wrote, not one folder off: a real model left a
+  // folder out of a long path, and the file landed elsewhere on the disk.
+  await store.updateSettings({ allowSystemAccess: true });
+  const farDir = path.join(dir, 'far', 'deeper', 'place');
+  await ensureDir(farDir);
+  const rightPlace = path.join(farDir, 'made.txt');
+  const wrongPlace = path.join(dir, 'far', 'place', 'made.txt');
+  run = await chat([
+    toolCall('write_file', { path: wrongPlace, content: 'hello\n' }),
+    toolCall('write_file', { path: rightPlace, content: 'hello\n' }),
+    'The file is made.',
+  ], `create the file ${rightPlace} containing only the word hello`);
+  assert.deepEqual(toolBlocks(run.message).map((block) => block.status), ['error', 'done']);
+  assert.match(run.calls[1].messages.at(-1).content, /is not the path the user wrote[\s\S]*deeper[\s\S]*copied exactly/);
+  assert.equal(fs.existsSync(wrongPlace), false, 'nothing lands in the wrong folder');
+  assert.equal(await fsp.readFile(rightPlace, 'utf8'), 'hello\n');
+  // A place the user did not name at all is the model's choice, as before.
+  run = await chat([toolCall('write_file', { path: path.join(farDir, 'other.txt'), content: 'x\n' }), 'Made.'], `make a note next to ${rightPlace}`);
+  assert.equal(toolBlocks(run.message)[0].status, 'done');
+  await store.updateSettings({ allowSystemAccess: false });
+
+  // Asked to search the web with internet off, "internet access is off" is the answer: no file has
+  // to be opened for it. A claim to have searched is still not taken.
+  run = await chat(['I cannot search the web: internet access is off. You can turn it on in Settings → Agent permissions.', 'The workspace holds no llama.cpp repository.'], 'search the web for the newest llama.cpp release on GitHub');
+  assert.equal(run.calls.length, 1, 'the true answer is taken as it is');
+  assert.match(run.message.content, /internet access is off/);
+  run = await chat(['The newest llama.cpp release is b9999.', toolCall('list_files', { path: '.' }), 'I cannot look that up: internet access is off.'], 'search the web for the newest llama.cpp release on GitHub');
+  assert.ok(run.calls.length > 1, 'an answer with no source is still not taken');
+  assert.doesNotMatch(run.message.content, /b9999/);
+
+  // Asked only to be told something, a real model with the terminal on ran the file, saw it fail, and
+  // changed the code unasked. A file that is there is not changed for a question.
+  const calcBefore = await fsp.readFile(path.join(workspaceDir, 'calc.js'), 'utf8');
+  const wrongEdit = toolCall('replace_in_file', { path: 'calc.js', find: 'a + b', replace: 'a - b' });
+  for (const request of ['what does calc.js do?', 'read calc.js and tell me what it returns for 2 and 3']) {
+    run = await chat([toolCall('read_file', { path: 'calc.js' }), wrongEdit, 'calc.js adds two numbers. I did not change it.'], request);
+    assert.deepEqual(toolBlocks(run.message).map((block) => [block.name, block.status]), [['read_file', 'done'], ['replace_in_file', 'error']], request);
+    assert.ok(run.calls.some((item) => /replace_in_file was not run: the user asked a question[\s\S]*Nothing was changed/.test(item.messages.at(-1).content)), request);
+    assert.equal(await fsp.readFile(path.join(workspaceDir, 'calc.js'), 'utf8'), calcBefore);
+  }
+  // A new file may be made for an answer.
+  run = await chat([toolCall('write_file', { path: 'answer.txt', content: 'add returns the sum.\n' }), 'Saved in answer.txt.'], 'tell me what add returns and save it in answer.txt');
+  assert.deepEqual(toolBlocks(run.message).map((block) => [block.name, block.status]), [['write_file', 'done']]);
+  await fsp.rm(path.join(workspaceDir, 'answer.txt'), { force: true });
+  await fsp.writeFile(path.join(workspaceDir, 'calc.js'), calcBefore);
+
+  // A folder that is not there is not an empty folder. A real model listed the workspace by its own
+  // name, was shown "(empty)", and told the user that the files it had just read did not exist.
+  const byName = await tools.run('list_files', { path: path.basename(workspaceDir) });
+  assert.equal(byName.ok, true);
+  assert.match(byName.output, /calc\.js/, 'the workspace named by its own folder name is the workspace');
+  const nowhere = await tools.run('list_files', { path: 'nowhere' });
+  assert.equal(nowhere.ok, false);
+  assert.match(nowhere.output, /The folder "nowhere" does not exist\. The workspace itself is "\."/);
+
+  // Allowing terminal commands is the permission: no question for each command after it.
+  const settingsStore = new Store(path.join(dir, 'settings'));
+  await settingsStore.init();
+  assert.equal(settingsStore.getSettings().askBeforeCommands, true, 'while the terminal is off nothing has been decided');
+  await settingsStore.updateSettings({ allowShell: true });
+  assert.equal(settingsStore.getSettings().askBeforeCommands, false);
+  // Whoever wants to approve each command turns the question on, and it stays on.
+  await settingsStore.updateSettings({ askBeforeCommands: true });
+  await settingsStore.updateSettings({ allowInternet: true });
+  await settingsStore.updateSettings({ allowShell: true });
+  assert.equal(settingsStore.getSettings().askBeforeCommands, true, 'saving the same switch again decides nothing');
+  // Both in one change: what was asked for is kept.
+  await settingsStore.updateSettings({ allowShell: false });
+  await settingsStore.updateSettings({ allowShell: true, askBeforeCommands: true });
+  assert.equal(settingsStore.getSettings().askBeforeCommands, true);
+  console.log('endless small talk, the same file written again, raw tool calls kept out of answers, files longer than one reply, invented file listings, the workspace by its full path, command questions: OK');
+}
+
+/** A PC with several graphics cards: an RTX 3060 and two Tesla P40, as one user runs. */
+async function testSeveralGraphicsCards() {
+  const { parseNvidiaCards, gpuSummary } = require('../electron/lib/hardware.cjs');
+  const { gpuReading } = require('../electron/lib/systemStats.cjs');
+  const { localCards } = require('../electron/lib/placement.cjs');
+  const { LlamaManager } = require('../electron/lib/llama.cjs');
+  const MiB = 1024 * 1024;
+
+  // nvidia-smi lists the cards in slot order, and an older card's name has no "NVIDIA" in it.
+  const smi = ['Tesla P40, 24576, 24210, 366, 0', 'NVIDIA GeForce RTX 3060, 12288, 11020, 1268, 87', 'Tesla P40, 24576, 24210, 366, 41', ''].join('\r\n');
+  const cards = parseNvidiaCards(smi);
+  assert.equal(cards.length, 3, 'every card is read, not only the first');
+  assert.deepEqual(cards[1], { name: 'NVIDIA GeForce RTX 3060', totalMB: 12288, freeMB: 11020, usedMB: 1268, percent: 87 });
+  assert.equal(gpuSummary(cards.map((card) => card.name)), '2× Tesla P40 + NVIDIA GeForce RTX 3060');
+  assert.deepEqual(parseNvidiaCards(''), []);
+  assert.deepEqual(parseNvidiaCards('NVIDIA GeForce RTX 2070, 8192, 7492, 700, [N/A]')[0].percent, 0, 'a card that does not report how busy it is');
+
+  // The title bar: memory added up, the busiest card's percentage, and each card on its own.
+  const reading = gpuReading(cards);
+  assert.equal(reading.percent, 87);
+  assert.equal(reading.totalBytes, (24576 * 2 + 12288) * MiB);
+  assert.equal(reading.usedBytes, (366 * 2 + 1268) * MiB);
+  assert.deepEqual(reading.cards.map((card) => card.percent), [0, 87, 41]);
+  assert.equal(gpuReading([cards[1]]).cards, undefined, 'one card: as before');
+  assert.equal(gpuReading([]), null);
+
+  // What the engine lists decides what can be used. (CUDA puts the fastest card first.)
+  const names = cards.map((card) => card.name);
+  const all = parseDeviceList(['Available devices:', '  CUDA0: NVIDIA GeForce RTX 3060 (12288 MiB, 11020 MiB free)', '  CUDA1: Tesla P40 (24576 MiB, 24210 MiB free)', '  CUDA2: Tesla P40 (24576 MiB, 24210 MiB free)'].join('\n'));
+  let found = localCards(all, names);
+  assert.deepEqual(found.used.map((device) => `${device.name} ${device.card}`), ['CUDA0 NVIDIA GeForce RTX 3060', 'CUDA1 Tesla P40', 'CUDA2 Tesla P40']);
+  assert.deepEqual(found.missing, []);
+  // A CUDA 13 engine has no code for a P40: it lists the RTX 3060 alone.
+  found = localCards(all.slice(0, 1), names);
+  assert.deepEqual([found.used.length, found.missing], [1, ['Tesla P40', 'Tesla P40']]);
+  // Vulkan also lists an integrated GPU, which is none of the cards and is left to llama.cpp.
+  found = localCards(parseDeviceList(['  Vulkan0: NVIDIA GeForce RTX 3060 (12288 MiB, 11020 MiB free)', '  Vulkan1: Intel(R) UHD Graphics 770 (16000 MiB, 15000 MiB free)'].join('\n')), names);
+  assert.deepEqual([found.used.map((device) => device.name), found.missing], [['Vulkan0'], ['Tesla P40', 'Tesla P40']]);
+
+  // A load, with the engine replaced by a program that stops at once: each try's arguments are
+  // in the log, and so is the way down from Uma's plan to llama.cpp's own split.
+  const layers = (count, each) => ({
+    nLayer: count, nEmbd: 4096, nHead: 32, nHeadKv: 8, keyLength: 128, valueLength: 128, attentionLayers: count, contextLength: 32768,
+    layerBytes: Array.from({ length: count }, () => each * MiB), inputBytes: 300 * MiB, otherBytes: 300 * MiB, totalBytes: (count * each + 600) * MiB,
+  });
+  const make = (info, list, gpus = names) => {
+    const lines = [];
+    const manager = new LlamaManager({
+      store: { getRuntime: () => ({ serverPath: process.execPath, backend: 'cuda', version: 'b12318' }), getEffectiveSettings: () => ({ contextSize: 8192 }), getSettings: () => ({}) },
+      runtime: { hardware: { gpus: gpus.map((name) => ({ name })) } },
+      logsDir: root, modelInfo: async () => info, freeRam: () => 64 * 1024 * MiB, freeVram: async () => 24210 * MiB,
+      listDevices: async () => list.map((device) => `  ${device.name}: ${device.description} (${device.totalMB} MiB, ${device.freeMB} MiB free)`).join('\n'),
+    });
+    const log = manager.log.bind(manager);
+    manager.log = (line) => { lines.push(line); log(line); };
+    return { manager, lines, starts: () => lines.filter((line) => line.startsWith('[uma] starting')) };
+  };
+  const runtimeConfig = { serverPath: process.execPath, backend: 'cuda', version: 'b12318' };
+  const model = { id: 'big', name: 'Big', path: __filename };
+  const after = (line, flag) => { const parts = line.split(' '); return parts[parts.indexOf(flag) + 1]; };
+
+  // 20 GB on 57 GB of free cards: fixed shares by free memory, then a fill plan, then no plan.
+  let run = make(layers(40, 480), all);
+  await assert.rejects(run.manager.startWithHelpers(model, runtimeConfig, 'key'), /stopped while loading/);
+  let starts = run.starts();
+  assert.equal(starts.length, 3, run.lines.join('\n'));
+  assert.equal(after(starts[0], '-dev'), 'CUDA0,CUDA1,CUDA2');
+  const shares = after(starts[0], '-ts').split(',').map(Number);
+  assert.ok(shares[0] >= 16 && shares[0] <= 20 && shares[1] === shares[2] && shares[1] >= 39 && shares[1] <= 43, `shares ${shares}`);
+  assert.equal(after(starts[0], '-ngl'), 'auto');
+  assert.ok(!starts[1].includes(' -ts ') && after(starts[1], '--fit-target') === '512,512,512', 'the fill plan');
+  assert.ok(!starts[2].includes(' -dev ') && after(starts[2], '--fit-target') === '300', "llama.cpp's own split");
+  assert.match(run.lines.join('\n'), /graphics cards the engine can use: CUDA0 NVIDIA GeForce RTX 3060 \(11020 of 12288 MiB free\), CUDA1 Tesla P40/);
+  assert.match(run.lines.join('\n'), /plan for 3 graphics cards \(the model fits/);
+  assert.match(run.lines.join('\n'), /balanced plan for this PC's graphics cards did not load; retrying with a fill plan/);
+  assert.match(run.lines.join('\n'), /loading again with llama\.cpp's own split/);
+  assert.equal(run.manager.computeInfo().gpuName, 'NVIDIA GeForce RTX 3060 + 2× Tesla P40');
+
+  // 80 GB does not fit: the cards are filled, and there is nothing balanced to retry.
+  run = make(layers(80, 1000), all);
+  await assert.rejects(run.manager.startWithHelpers(model, runtimeConfig, 'key'), /stopped while loading/);
+  starts = run.starts();
+  assert.equal(starts.length, 2);
+  assert.ok(!starts[0].includes(' -ts ') && after(starts[0], '-dev') === 'CUDA0,CUDA1,CUDA2' && after(starts[0], '--fit-target') === '512,512,512');
+
+  // The engine lists one card of the three: only that card's memory counts, and the user is told.
+  run = make(layers(40, 480), all.slice(0, 1));
+  await assert.rejects(run.manager.startWithHelpers(model, runtimeConfig, 'key'), /stopped while loading/);
+  starts = run.starts();
+  assert.equal(starts.length, 1);
+  assert.ok(!starts[0].includes(' -dev ') && after(starts[0], '-ngl') === 'auto', '20 GB does not fit on the 12 GB card, whatever the other two have free');
+  assert.deepEqual(run.manager.cards.missing, ['Tesla P40', 'Tesla P40']);
+  assert.match(run.lines.join('\n'), /NOT usable with this engine \(cuda b12318\): 2× Tesla P40/);
+  run = make(layers(20, 200), all.slice(0, 1));
+  await assert.rejects(run.manager.startWithHelpers(model, runtimeConfig, 'key'), /stopped while loading/);
+  assert.equal(after(run.starts()[0], '-ngl'), 'all', 'a small model fits on the one usable card');
+
+  // One card in the PC: the engine is not asked for its list, and the load goes as it always did.
+  let asked = 0;
+  run = make(layers(20, 200), all.slice(0, 1), ['NVIDIA GeForce RTX 3060']);
+  run.manager.listDevices = async () => { asked += 1; return ''; };
+  await assert.rejects(run.manager.startWithHelpers(model, runtimeConfig, 'key'), /stopped while loading/);
+  assert.equal(asked, 0);
+  assert.equal(after(run.starts()[0], '-ngl'), 'all');
+  assert.deepEqual(run.manager.cards, { used: [], missing: [] });
+  console.log('several graphics cards (readings, what the engine lists, the split and its fallbacks): OK');
+}
+
+async function testOtherLanguages() {
+  const kind = (text) => {
+    const task = classifyTask(text);
+    return [Boolean(task.agentic), Boolean(task.wantsEdit), Boolean(task.asksOnly), Boolean(task.isContinue)].join();
+  };
+  // A request in Chinese (simplified and traditional) or Japanese is read like its English form.
+  const requests = [
+    ['make a website for my bakery', '给我的面包店做一个网站', '幫我的麵包店做一個網站', '私のパン屋のウェブサイトを作ってください'],
+    ['fix the bug in the login form', '修复登录表单里的bug', '修復登入表單裡的bug', 'ログインフォームのバグを修正してください'],
+    ['add a contact page to the site', '给网站添加一个联系页面', '為網站新增一個聯絡頁面', 'サイトに連絡先ページを追加して'],
+    ['write the tests for this file', '为这个文件编写测试', '為這個檔案編寫測試', 'このファイルのテストを書いて'],
+    ['explain this project', '解释一下这个项目', '解釋一下這個專案', 'このプロジェクトを説明して'],
+    ['what is this project?', '这个项目是什么？', '這個專案是什麼？', 'このプロジェクトは何ですか？'],
+    ['did you fix the bug in main.cpp?', '你修复了main.cpp里的bug吗？', '你修復了main.cpp裡的bug嗎？', 'main.cppのバグを修正しましたか？'],
+    ['how do I create a website?', '怎么创建网站？', '怎麼建立網站？', 'ウェブサイトはどうやって作りますか？'],
+    ['what is the capital of France?', '法国的首都是什么？', '法國的首都是什麼？', 'フランスの首都はどこですか？'],
+    ['can you add a button to my site?', '你能在我的网站上添加一个按钮吗？', '你能在我的網站上新增一個按鈕嗎？', '私のサイトにボタンを追加してもらえますか？'],
+    ['tell me a joke', '讲个笑话', '講個笑話', 'ジョークを言って'],
+    ['thanks, that works', '谢谢，可以了', '謝謝，可以了', 'ありがとう、動きました'],
+    ['continue', '继续', '繼續', '続けて'],
+    ['is the performance ok?', '性能有问题吗？', '效能有問題嗎？', '性能は大丈夫ですか？'],
+  ];
+  for (const [english, ...others] of requests) {
+    for (const other of others) assert.equal(kind(other), kind(english), `"${other}" is read like "${english}" (${englishGist(other)})`);
+  }
+  assert.equal(englishGist('你修复了main.cpp里的bug吗？').includes('main.cpp'), true, 'a file name keeps its spelling');
+
+  // What a reply says, whatever language the model answers in. Each of these was unchecked before:
+  // the checks only knew English.
+  const sayings = [
+    ['claims a change', (text) => claims(CLAIMS_CHANGE_RE, text), true, [
+      'I have fixed the bug in main.cpp.',
+      'Ho corretto il bug in main.cpp.', 'Ho già aggiornato il file index.html.', 'Il file è stato aggiornato.', 'Ho aggiunto la funzione e modificato lo stile.', 'La build è riuscita.', 'Ora è corretto.',
+      'He corregido el error en main.cpp.', 'El archivo ha sido actualizado.', 'Se ha actualizado el archivo.', 'Ya he añadido la función.',
+      '我已经修复了main.cpp中的bug。', '文件已更新。', '我添加了一个新函数。', '构建成功。', '已創建檔案 index.html。',
+      'main.cppのバグを修正しました。', 'ファイルが更新されました。', 'ビルドに成功しました。', '関数を追加しました。',
+    ]],
+    // A denial, a condition, a question, an offer or an explanation is not a claim.
+    ['claims a change', (text) => claims(CLAIMS_CHANGE_RE, text), false, [
+      'Non ho modificato nulla.', 'Se vuoi, posso correggere il bug.', 'Hai corretto il bug?', 'Potrei aggiungere una funzione.', 'Il file non è stato aggiornato.', 'Per correggerlo devi aggiornare il file.',
+      'Il codice è corretto e ben organizzato.', 'Il file è aggiornato all\'ultima versione.', 'La funzione aggiorna lo stato quando clicchi il pulsante.',
+      'No he modificado nada.', 'Si quieres, puedo corregir el error.', 'Podría añadir una función.', 'El código es correcto y está bien organizado.',
+      '我没有修改任何文件。', '如果需要，我可以修复这个bug。', '你修复了吗？', '尚未更新文件。', '这个函数用于更新界面状态。', '要添加页面，请创建一个html文件。',
+      '何も変更していません。', '必要であれば、バグを修正できます。', '修正しましたか？', 'この関数は画面の状態を更新します。', 'ページを追加するには、htmlファイルを作成してください。',
+    ]],
+    ['names a tool as used', (text) => toolsClaimed(text).includes('read_file'), true, [
+      'Ho usato read_file per leggere il file.', 'Ho usato lo strumento read_file.', 'He usado read_file.', '我使用了read_file工具。', 'read_fileを使用しました。',
+    ]],
+    ['says the file is not there', (text) => saysMissing(text, 'electron/main.cjs'), true, [
+      'Il file electron/main.cjs non esiste.', 'Non ho trovato main.cjs.', 'El archivo electron/main.cjs no existe.', 'electron/main.cjs 不存在。', 'electron/main.cjs は存在しません。',
+    ]],
+    ['asks what is on the screen', asksToSee, true, [
+      'cosa vedi?', 'riesci a vedere il mio schermo?', 'guarda il mio schermo', '¿qué ves?', '¿puedes ver mi pantalla?', '你能看到什么？', '你能看到我的屏幕吗？', '何が見えますか？', '画面が見えますか？',
+    ]],
+    ['says it sees the screen', (text) => says(REPLY_CHECKS.sight, text), true, [
+      'Vedo la finestra del browser.', 'Posso vedere il tuo schermo.', 'Ecco cosa vedo.', 'La pagina mostra un elenco.', 'Veo la pantalla del navegador.', '我看到屏幕上有一个浏览器窗口。', '屏幕上显示了一个错误。', '画面にブラウザのウィンドウが見えます。',
+    ]],
+    ['says it cannot click', (text) => says(REPLY_CHECKS.cannotInput, text), true, [
+      'Non posso cliccare sul pulsante.', 'Non sono in grado di controllare il mouse.', 'No puedo hacer clic en el botón.', '我无法点击按钮。', 'ボタンをクリックできません。',
+    ]],
+    ['says it clicks, with no tool for it', (text) => says(REPLY_CHECKS.pretendsInput, text), true, [
+      'Ora clicco sul pulsante.', 'Cliccherò sul link.', 'Lasciami cliccare sulla casella.', '我点击了搜索框。', '我将点击这个按钮。',
+    ]],
+    ['says it is done', (text) => says(REPLY_CHECKS.done, text), true, [
+      'Ho aperto YouTube.', 'Ho cliccato sul video.', 'Il video è ora in riproduzione.', 'Il compito è completato.', 'He abierto YouTube.', '我已经打开了YouTube。', '视频正在播放。', 'YouTubeを開きました。', '動画を再生しています。', '検索ボックスをクリックしました。',
+    ]],
+    ['announces a next step', (text) => says(REPLY_CHECKS.nextStep, text), true, [
+      'Ora leggerò il file.', 'Adesso devo controllare il codice.', 'Vediamo cosa contiene il file.', 'Ahora voy a leer el archivo.', '接下来我会检查文件。', '让我看一下这个文件。', '次にファイルを確認します。',
+    ]],
+    ['announces a next step', (text) => says(REPLY_CHECKS.nextStep, text), false, [
+      'Il file contiene tre funzioni.', 'Grazie per la pazienza.', '这个文件包含三个函数。', 'ご確認をお願いします。', 'この関数は画面の状態を更新します。',
+    ]],
+    ['offers, and waits for an answer', (text) => says(REPLY_CHECKS.offers, text), true, [
+      'Vuoi che corregga il bug?', 'Devo procedere con la modifica?', 'Fammi sapere se vuoi che continui.', '¿Quieres que corrija el error?', '需要我修复它吗？', '修正しましょうか？',
+    ]],
+    ['says the build worked', (text) => says(REPLY_CHECKS.build, text), true, [
+      'La build è riuscita.', 'Compila senza errori.', 'La compilación fue exitosa.', '编译成功。', 'ビルドが成功しました。',
+    ]],
+    ['agrees', (text) => says(REPLY_CHECKS.agrees, text), true, ['sì', 'sí', 'vale', '好的', 'はい', 'はい、お願いします']],
+    ['asks what was said in the chat', (text) => says(REPLY_CHECKS.recall, text), true, [
+      'cosa ricordi di questa chat?', '¿qué recuerdas de este chat?', '你还记得我们聊了什么吗？', '总结一下这次对话', 'この会話を要約して', '覚えていますか？',
+    ]],
+  ];
+  for (const [label, check, wanted, texts] of sayings) {
+    for (const text of texts) assert.equal(Boolean(check(text)), wanted, `${label} (${wanted}): "${text}" read as "${englishGist(text)}"`);
+  }
+  // French, German and Portuguese: the same two tables, in scripts/test-languages.json (a request
+  // in English and how it is asked in each language; what a reply says, and whether it should count).
+  const more = JSON.parse(await fsp.readFile(path.join(__dirname, 'test-languages.json'), 'utf8'));
+  for (const [english, ...others] of more.requests) {
+    for (const other of others) assert.equal(kind(other), kind(english), `"${other}" is read like "${english}" (${englishGist(other)})`);
+  }
+  const named = {
+    change: (text) => claims(CLAIMS_CHANGE_RE, text), tool: (text) => toolsClaimed(text).includes('read_file'), missing: (text) => saysMissing(text, 'electron/main.cjs'), asksSee: asksToSee,
+    sight: (text) => says(REPLY_CHECKS.sight, text), cannotInput: (text) => says(REPLY_CHECKS.cannotInput, text), pretendsInput: (text) => says(REPLY_CHECKS.pretendsInput, text),
+    done: (text) => says(REPLY_CHECKS.done, text), nextStep: (text) => says(REPLY_CHECKS.nextStep, text), offers: (text) => says(REPLY_CHECKS.offers, text),
+    build: (text) => says(REPLY_CHECKS.build, text), agrees: (text) => says(REPLY_CHECKS.agrees, text), recall: (text) => says(REPLY_CHECKS.recall, text),
+  };
+  for (const [name, wanted, texts] of more.sayings) {
+    for (const text of texts) assert.equal(Boolean(named[name](text)), wanted, `${name} (${wanted}): "${text}" read as "${englishGist(text)}"`);
+  }
+  // One language does not take another's text: these are read as before the three were added.
+  for (const [text, reading] of [
+    ['Ho corretto il bug in main.cpp.', /^i fixed the bug in main\.cpp\.$/], ['togli lo sfondo da index.html', /^remove /], ['aggiungi le pagine al sito', /^add the pages to the website$/],
+    ['añade dos botones a la página', /^add /], ['El archivo ha sido actualizado.', /has been updated/], ['il file é stato aggiornato', /updated/],
+  ]) assert.match(englishGist(text), reading, text);
+  // English is read as it was written, and code between fences is never read as prose.
+  for (const text of ['I have fixed the bug in main.cpp.', 'He said the file is missing.', 'Let me check the file.', 'The build succeeded.',
+    'Was the test page updated in the last build?', 'The process will die if the war file is missing, so restart it.', 'This project uses the MIT license and has no tests.',
+    'Um, so the button is not working on the site.', 'Put the aux cable in, et voila: it is done.']) assert.equal(englishGist(text), text);
+  assert.match(englishGist('Ecco il codice:\n```js\nfor (let i = 0; i < 3; i++) console.log(i)\n```\nHo aggiunto il ciclo.'), /for \(let i = 0; i < 3; i\+\+\) console\.log\(i\)[\s\S]*i added/);
+
+  // Through the agent: a model answers that it fixed the bug, having touched nothing. Uma does not
+  // pass that on as done: it tells the model nothing was changed, and marks the text for the user.
+  // The same reply gets the same treatment in every language.
+  const dir = path.join(root, 'languages');
+  await fsp.rm(dir, { recursive: true, force: true });
+  const store = new Store(path.join(dir, 'data'));
+  await store.init();
+  await store.updateSettings({ allowEdits: true });
+  const workspaceDir = path.join(dir, 'workspace');
+  await ensureDir(workspaceDir);
+  await fsp.writeFile(path.join(workspaceDir, 'main.cpp'), 'int main() { return 1; }\n');
+  const workspace = new Workspace({ root: workspaceDir, trash: () => {} });
+  await workspace.init();
+  const tools = new ToolRunner({ workspace, store, onChanged: () => {} });
+  const conversations = new ConversationStore(path.join(dir, 'conversations'));
+  await conversations.init();
+  const chat = async (script, text) => {
+    const conversation = await conversations.create();
+    const calls = [];
+    let done;
+    const finished = new Promise((resolve) => { done = resolve; });
+    const agent = new AgentRunner({
+      store,
+      workspace,
+      models: { resolveActive: async () => ({ id: 'mock', name: 'Mock', family: 'Test' }) },
+      conversations,
+      toolRunner: tools,
+      llama: {
+        async ensureServer() {},
+        async *streamChat(request) {
+          calls.push(request);
+          yield { type: 'text', text: script[Math.min(calls.length - 1, script.length - 1)] };
+        },
+      },
+      send: (_channel, payload) => { if (payload?.type === 'assistant-end') done(payload.message); },
+    });
+    await agent.send(conversation.id, text);
+    return { message: await finished, calls };
+  };
+  // What Uma marked in the reply: the text it set aside as a claim, and the answer it kept.
+  const marks = (message) => message.blocks.map((block) => block.unchecked).filter(Boolean).join();
+  const english = await chat(['I have fixed the bug in main.cpp: it now returns 0.', 'I have not changed anything yet: the file returns 1.'], 'fix the bug in main.cpp');
+  assert.match(marks(english.message), /^claimed/);
+  for (const [request, lie, truth] of [
+    ['correggi il bug in main.cpp', 'Ho corretto il bug in main.cpp: ora restituisce 0.', 'Non ho ancora modificato nulla: il file restituisce 1.'],
+    ['corrige el error en main.cpp', 'He corregido el error en main.cpp: ahora devuelve 0.', 'Todavía no he modificado nada: el archivo devuelve 1.'],
+    ['修复main.cpp里的bug', '我已经修复了main.cpp中的bug。', '我还没有修改任何文件。'],
+    ['main.cppのバグを修正してください', 'main.cppのバグを修正しました。', 'まだ何も変更していません。'],
+    ['corrige le bug dans main.cpp', "J'ai corrigé le bug dans main.cpp : il renvoie maintenant 0.", "Je n'ai encore rien modifié : le fichier renvoie 1."],
+    ['behebe den Fehler in main.cpp', 'Ich habe den Fehler in main.cpp behoben: Es gibt jetzt 0 zurück.', 'Ich habe noch nichts geändert: Die Datei gibt 1 zurück.'],
+    ['corrija o bug em main.cpp', 'Corrigi o bug em main.cpp: agora retorna 0.', 'Ainda não modifiquei nada: o arquivo retorna 1.'],
+  ]) {
+    const run = await chat([lie, truth], request);
+    assert.ok(run.calls.length >= 2, `"${lie}" was not let through`);
+    assert.match(run.calls[1].messages.at(-1).content, /Nothing was changed/);
+    assert.equal(await fsp.readFile(path.join(workspaceDir, 'main.cpp'), 'utf8'), 'int main() { return 1; }\n');
+    assert.equal(run.calls.length, english.calls.length, request);
+    assert.equal(marks(run.message), marks(english.message), `"${lie}" is marked like the English one`);
+  }
+  console.log('requests and replies in Italian, Spanish, French, German, Portuguese, Chinese and Japanese are checked like English ones: OK');
+}
+
 async function main() {
   await fsp.rm(root, { recursive: true, force: true });
   await ensureDir(root);
@@ -1333,6 +2613,13 @@ async function main() {
   await testSkillFormat();
   await testSkillRanking();
   await testSkillLibrary();
+  await testSkillWorkflow();
+  await testOtherLanguages();
+  await testRealModelFixes();
+  await testDocuments();
+  await testSeeing();
+  await testSeveralGraphicsCards();
+  testPromptSize();
   testMainRamFirst();
   await testSpeedReadings();
   await testHelperBusyShare();

@@ -76,6 +76,9 @@ const DEFAULT_SETTINGS = {
   // The Uma LLM version whose licence the user accepted, and when. A new version asks again.
   acceptedTermsVersion: '',
   acceptedTermsAt: '',
+  // Look for a newer Uma once a day (updater.cjs), and when the last look was.
+  checkForUpdates: true,
+  lastUpdateCheck: 0,
   // Load the selected model when Uma opens (and when another is selected), so the first reply does not wait for it.
   loadModelAtStart: true,
   skillsSeeded: false,
@@ -133,9 +136,14 @@ class Store {
 
   async updateSettings(patch) {
     const allowed = Object.keys(DEFAULT_SETTINGS);
+    // Allowing terminal commands is the permission: from then on they run without a question for
+    // each one. Whoever wants the question turns "Ask before each command" on afterwards (or in the
+    // same change, which is then left as it was asked).
+    const terminalTurnedOn = patch?.allowShell === true && this.settings.allowShell !== true && patch.askBeforeCommands === undefined;
     for (const [key, value] of Object.entries(patch || {})) {
       if (allowed.includes(key)) this.settings[key] = value;
     }
+    if (terminalTurnedOn) this.settings.askBeforeCommands = false;
     await writeJsonAtomic(this.settingsFile, this.settings);
     return this.getSettings();
   }

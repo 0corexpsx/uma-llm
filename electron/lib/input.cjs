@@ -627,6 +627,12 @@ class InputController {
         const keys = String(args.keys ?? '').trim();
         if (!keys) throw new Error('Put the keys in "keys", for example "ctrl+l", "enter" or "alt+tab".');
         await this.backend.keys(keys);
+        // "h e l l o e n t e r": a real model spelled the Enter key out, and "helloenter" was typed.
+        // Each single letter is a key of its own, so the answer says what was typed and how a key is named.
+        const parts = keys.split(/\s+/);
+        if (parts.length >= 3 && parts.every((part) => part.length === 1)) {
+          return `typed "${parts.join('')}", one letter at a time. Every letter given was typed: a key such as Enter or Tab is pressed by its whole name as one word, and text goes in "text", for example {"text":"hello","keys":"enter"}. If letters were typed that were meant as a key, remove them (backspace) and press the key`;
+        }
         return `pressed ${keys}`;
       }
       case 'focus': {

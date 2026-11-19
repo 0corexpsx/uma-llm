@@ -6,6 +6,7 @@ import {
 import { api } from '../api.js';
 import { Button, IconButton, OS, SectionLabel, Spinner, formatBytes } from './ui.jsx';
 import { t } from '../i18n.js';
+import GpuCards from './GpuCards.jsx';
 
 export default function Inspector({
   conversation,
@@ -134,7 +135,12 @@ export default function Inspector({
             </p>
           )}
           {server?.running && server.placement && (
-            <p className="inspector-helpers" title={server.placement.mode === 'balanced'
+            <p className="inspector-helpers" title={!server.helpers?.servers?.length
+              // No helpers: the plan is for this PC's own graphics cards.
+              ? (server.placement.mode === 'balanced'
+                ? t('The model fits on this PC’s graphics cards, so it is shared between them in proportion to their free memory.')
+                : t('The model is larger than this PC’s graphics cards, so they are filled first and the rest stays in RAM.'))
+              : server.placement.mode === 'balanced'
               ? t('The model fits on the GPUs, so it is shared in proportion to their free memory.')
               : server.placement.devices.some((device) => device.kind === 'cpu')
                 ? t('The model is larger than the GPUs, so they are filled first, then the helpers’ RAM.')
@@ -144,9 +150,14 @@ export default function Inspector({
               {server.placement.devices.map((device) => t('{0} up to {1}', [
                 device.label
                   ? (device.kind === 'cpu' ? t('{0} RAM', [device.label]) : t('{0} GPU', [device.label]))
-                  : t('this PC’s GPU'),
+                  : device.card || t('this PC’s GPU'),
                 formatBytes(device.wantMB * 1024 * 1024),
               ])).join(' · ')}
+            </p>
+          )}
+          {server?.running && server.unusedGpus?.length > 0 && (
+            <p className="inspector-helpers is-warning" title={t('This PC has these graphics cards, but the installed engine does not list them, so nothing runs on them. Try another engine in Models: a Tesla P40 or a GTX 10 card needs CUDA 12.')}>
+              <Layers size={12} />{' '}{t('Not used by this engine: {0}', [server.unusedGpus.join(', ')])}
             </p>
           )}
           {server?.helpers?.skipped?.length > 0 && (
@@ -176,6 +187,8 @@ export default function Inspector({
           ))}
           <button type="button" className="mini-manage" onClick={onOpenModels}>{t('Manage models')}{' '}<ChevronRight size={13} /></button>
         </section>
+
+        <GpuCards />
 
         <section className={`scope-card ${settings?.allowEdits ? '' : 'is-readonly'}`}>
           <span className="scope-icon">{settings?.allowSystemAccess ? <ShieldAlert size={17} /> : settings?.allowEdits ? <ShieldCheck size={17} /> : <LockKeyhole size={17} />}</span>

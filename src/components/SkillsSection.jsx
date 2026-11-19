@@ -15,6 +15,11 @@ function riskLabel(risk) {
   return '';
 }
 
+/** "rube" as its users know it. */
+function connectorName(connector) {
+  return connector === 'rube' ? 'Rube (Composio)' : connector === 'mcp' ? 'MCP' : connector;
+}
+
 /** The skills that ship with Uma but are not installed: search, read what each does, install. */
 function LibraryModal({ open, onClose, onChanged, showToast }) {
   // showToast is a new function on every render of the app; reading it through a ref keeps the
@@ -22,7 +27,7 @@ function LibraryModal({ open, onClose, onChanged, showToast }) {
   const toast = useLatest(showToast);
   const [query, setQuery] = useState('');
   const [risk, setRisk] = useState('');
-  const [result, setResult] = useState({ items: [], total: 0, librarySize: 0 });
+  const [result, setResult] = useState({ items: [], total: 0, librarySize: 0, usableSize: 0 });
   const [loading, setLoading] = useState(false);
   const [busyName, setBusyName] = useState('');
   const request = useRef(0);
@@ -85,7 +90,10 @@ function LibraryModal({ open, onClose, onChanged, showToast }) {
       )}
     >
       <p className="modal-copy">
-        {t('All {0} skills from the Advance Skills Pack are always enabled. For each request the model picks the ones that fit, or the one you name at the start of a message. Install a skill to have your own copy to edit.', [result.librarySize])}
+        {t('All {0} skills from the Advance Skills Pack are always enabled. For each request the model picks the ones that fit, or the one you name at the start of a message. Install a skill to have your own copy to edit.', [result.usableSize || result.librarySize])}
+        {result.usableSize > 0 && result.usableSize < result.librarySize && (
+          <>{' '}{t('{0} more work only through a connector of other assistants (an MCP server, most of them Rube/Composio). Uma has no connectors, so the model is never given them; they stay listed for reference.', [result.librarySize - result.usableSize])}</>
+        )}
       </p>
       <div className="skill-library-search">
         <div className="skill-search-box">
@@ -104,6 +112,7 @@ function LibraryModal({ open, onClose, onChanged, showToast }) {
           <option value="safe">{t('Marked safe')}</option>
           <option value="unknown">{t('Not reviewed')}</option>
           <option value="critical">{t('Acts on real accounts')}</option>
+          <option value="connector">{t('Needs a connector')}</option>
         </select>
       </div>
       <div className="skill-library-list">
@@ -117,6 +126,7 @@ function LibraryModal({ open, onClose, onChanged, showToast }) {
                 {item.name}
                 {item.risk === 'critical' && <span className="skill-badge is-warning" title={t('This skill can change things outside this PC, such as accounts, servers, or repositories.')}><AlertTriangle size={11} />{' '}{riskLabel(item.risk)}</span>}
                 {item.risk === 'offensive' && <span className="skill-badge is-warning"><AlertTriangle size={11} />{' '}{riskLabel(item.risk)}</span>}
+                {item.connector && <span className="skill-badge is-warning" title={t('This skill works only through {0}, a connector of other assistants. Uma has no connectors, so the model is never given this skill.', [connectorName(item.connector)])}><AlertTriangle size={11} />{' '}{t('Needs a connector')}</span>}
                 {item.files > 0 && <span className="skill-badge" title={t('Extra files the model can read or run: references, scripts, templates.')}>{t('{0} files · {1}', [item.files + 1, formatBytes(item.bytes)])}</span>}
               </div>
               <p>{item.description}</p>
@@ -142,6 +152,8 @@ export default function SkillsSection({ settings, onUpdate, showToast }) {
   const [creating, setCreating] = useState(false);
   const [browsing, setBrowsing] = useState(false);
   const [librarySize, setLibrarySize] = useState(0);
+  // The library's skills the model can really be given: the others need a connector Uma lacks.
+  const [libraryUsable, setLibraryUsable] = useState(0);
   const [filter, setFilter] = useState('');
   const [showAll, setShowAll] = useState(false);
   const [form, setForm] = useState({ name: '', description: '', scope: 'global' });
@@ -156,7 +168,10 @@ export default function SkillsSection({ settings, onUpdate, showToast }) {
   }, [refresh, settings.workspacePath, settings.disabledSkills]);
 
   useEffect(() => {
-    api.searchSkillLibrary({ limit: 1 }).then((page) => setLibrarySize(page.librarySize || 0)).catch(() => {});
+    api.searchSkillLibrary({ limit: 1 }).then((page) => {
+      setLibrarySize(page.librarySize || 0);
+      setLibraryUsable(page.usableSize ?? page.librarySize ?? 0);
+    }).catch(() => {});
   }, []);
 
   const toggle = async (name, enabled) => {
@@ -193,7 +208,7 @@ export default function SkillsSection({ settings, onUpdate, showToast }) {
     return skills.filter((skill) => words.every((word) => skill.name.includes(word) || String(skill.description || '').toLowerCase().includes(word)));
   }, [skills, filter]);
   const shown = showAll || filter ? visible : visible.slice(0, INSTALLED_PAGE);
-  const usable = skills.filter((skill) => skill.enabled && !skill.error && !skill.needs).length;
+  const usable = skills.filter((skill) => skill.enabled && !skill.error && !skill.connector && (!skill.needs || skill.partial)).length;
 
   return (
     <section className="settings-section" id="settings-skills">
@@ -206,7 +221,7 @@ export default function SkillsSection({ settings, onUpdate, showToast }) {
           <SettingRow
             icon={Library}
             title={t('Advance Skills Pack from Genesys Lab ({0} skills)', [librarySize])}
-            description={t('{0} skills are always enabled. For each request the model picks the ones that fit. Installing a skill lets you edit it.', [(librarySize + usable).toLocaleString()])}
+            description={t('{0} skills are always enabled. For each request the model picks the ones that fit. Installing a skill lets you edit it.', [(libraryUsable + usable).toLocaleString()])}
           />
         </div>
       )}
@@ -231,7 +246,11 @@ export default function SkillsSection({ settings, onUpdate, showToast }) {
             key={`${skill.source}:${skill.name}`}
             icon={skill.error ? AlertTriangle : Sparkles}
             title={`${skill.name} · ${skill.source === 'project' ? t('this project') : t('all projects')}`}
-            description={skill.error || (skill.needs ? t('{0} Turn on {1} to use this skill.', [t(skill.description), t(skill.needs)]) : t(skill.description))}
+            description={skill.error || (skill.connector
+              ? t('{0} It works only through the {1} connector, which Uma does not have, so the model is never given it.', [t(skill.description), connectorName(skill.connector)])
+              : skill.partial
+              ? t('{0} With {1} off it writes the files and tells you the commands to run.', [t(skill.description), t(skill.needs)])
+              : skill.needs ? t('{0} Turn on {1} to use this skill.', [t(skill.description), t(skill.needs)]) : t(skill.description))}
           >
             <div className="skill-controls">
               <Button size="sm" variant="ghost" onClick={() => open(() => api.openSkill(skill.name))}>{t('Edit')}</Button>

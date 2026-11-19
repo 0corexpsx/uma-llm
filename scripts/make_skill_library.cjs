@@ -183,7 +183,30 @@ function repoFor(folder, known) {
     || null;
 }
 
+/**
+ * --reindex [folder]: reads every SKILL.md of a library that is already built (build/skill-library,
+ * or the folder given) again, refreshes what the index says about each skill that comes from its
+ * header (today: its connector), and packs the .asar again. No skill is added or removed.
+ */
+function reindex() {
+  const dir = folders[0] ? path.resolve(folders[0]) : outDir;
+  const file = path.join(dir, 'index.json');
+  const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+  let connectors = 0;
+  for (const skill of data.skills) {
+    const parsed = parseSkill(fs.readFileSync(path.join(dir, 'skills', skill.name, 'SKILL.md'), 'utf8'));
+    delete skill.connector;
+    if (parsed.connector) { skill.connector = parsed.connector; connectors += 1; }
+  }
+  fs.writeFileSync(file, JSON.stringify(data));
+  console.log(`library: ${data.skills.length} skills, ${connectors} of them need a connector`);
+  return require('@electron/asar').createPackage(dir, asarFile).then(() => {
+    console.log(`wrote ${asarFile} (${(fs.statSync(asarFile).size / 1024 / 1024).toFixed(1)} MB)`);
+  });
+}
+
 function main() {
+  if (args.includes('--reindex')) return reindex();
   if (!sources.length) throw new Error('No skills folder found.');
   fs.rmSync(outDir, { recursive: true, force: true });
   fs.mkdirSync(path.join(outDir, 'skills'), { recursive: true });
@@ -248,6 +271,8 @@ function main() {
         license: license.slice(0, 60),
         bytes: bytes + fs.statSync(file).size,
         files,
+        // Works only through a connector of another assistant (skills.cjs skillConnector): listed, never offered.
+        ...(parsed.connector ? { connector: parsed.connector } : {}),
       });
     }
   }

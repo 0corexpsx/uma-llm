@@ -47,13 +47,14 @@ const { AgentRunner } = require('./lib/agent.cjs');
 const { UndoLog } = require('./lib/undo.cjs');
 const { SkillStore } = require('./lib/skills.cjs');
 const { SkillLibrary } = require('./lib/skillLibrary.cjs');
+const { Updater } = require('./lib/updater.cjs');
 const { ProjectIndex } = require('./lib/rag.cjs');
 const { EmbeddingEngine, VectorStore } = require('./lib/embeddings.cjs');
 const { freeVramBytes } = require('./lib/hardware.cjs');
 const { ChatMemory, FOLDER_NAME: CHAT_MEMORY_FOLDER } = require('./lib/chatMemory.cjs');
 const { UserMemory, parseImport, EXPORT_PROMPT } = require('./lib/userMemory.cjs');
 const { BatchTuner, CANDIDATES: BATCH_SIZES } = require('./lib/batchTuner.cjs');
-const { capture } = require('./lib/capture.cjs');
+const { capture, printPdf } = require('./lib/capture.cjs');
 const { InputController } = require('./lib/input.cjs');
 const crypto = require('node:crypto');
 const { estimateMemory } = require('./lib/memory.cjs');
@@ -85,6 +86,7 @@ let toolRunner;
 let undoLog;
 let skills;
 let skillLibrary;
+let updater;
 // One search index per workspace folder, kept while Uma runs, so switching back is instant.
 const projectIndexes = new Map();
 let projectIndex = null;
@@ -252,6 +254,7 @@ function connectWorkspace(next) {
     skills,
     memory: userMemory,
     capture,
+    printPdf,
     input: inputController(),
   });
   agent = new AgentRunner({ store, workspace, models, llama, conversations, toolRunner, send, attachments, projectIndex, memory: userMemory, indexFor: projectIndexFor });
@@ -421,9 +424,21 @@ async function initServices() {
   });
   // One archive file in the installed app; the folder it is built from when run from source.
   skillLibrary = new SkillLibrary({
-    dir: app.isPackaged ? path.join(process.resourcesPath, 'skill-library.asar') : path.join(__dirname, '..', 'build', 'skill-library'),
+    // (A checkout may hold only the archive: the folder is 190 MB of other people's files.)
+    dir: app.isPackaged ? path.join(process.resourcesPath, 'skill-library.asar')
+      : [path.join(__dirname, '..', 'build', 'skill-library'), path.join(__dirname, '..', 'build', 'skill-library.asar')].find((item) => fs.existsSync(item)) || path.join(__dirname, '..', 'build', 'skill-library'),
   });
   skills = new SkillStore({ globalDir: dirs.skills, bundledDir: path.join(__dirname, 'skills'), store, trash: (target) => shell.trashItem(target), library: skillLibrary });
+  // Where a newer Uma is published: the releases of its own repository (package.json → updates).
+  const updates = require('../package.json').updates || {};
+  updater = new Updater({
+    version: UMA_VERSION,
+    feed: process.env.UMA_UPDATE_FEED ?? updates.feed,
+    downloads: process.env.UMA_UPDATE_DOWNLOADS ?? updates.downloads,
+    page: updates.page,
+    dir: path.join(userDataDir, 'updates'),
+    onChange: (state) => send('updates:changed', state),
+  });
   await skills.seed().catch((err) => console.error(err));
   hardware = await detectHardware();
   models = new ModelManager({
@@ -1407,6 +1422,19 @@ function registerIpc() {
   });
   // Copies text with the system clipboard, which works even when the page has no focus.
   ipcMain.handle('app:copy', async (_event, text) => { clipboard.writeText(String(text || '')); return true; });
+  // Settings → Updates.
+  ipcMain.handle('updates:state', async () => updater.state);
+  ipcMain.handle('updates:check', async () => {
+    await store.updateSettings({ lastUpdateCheck: Date.now() });
+    return updater.check();
+  });
+  ipcMain.handle('updates:download', async () => updater.download());
+  ipcMain.handle('updates:install', async () => {
+    await updater.install();
+    // The installer replaces Uma's files, so Uma closes; the installer starts it again.
+    setTimeout(() => app.quit(), 600);
+    return true;
+  });
   ipcMain.handle('conversations:open-folder', async (_event, id) => {
     const conversation = await conversations.get(id);
     if (conversation?.folder) await shell.openPath(conversation.folder);
@@ -1525,6 +1553,15 @@ async function boot() {
     });
   }
   if (network.settings().share) freeForSharing().then(() => network.resume()).catch(() => {});
+  // A look for a newer Uma, once a day at most and only while the user leaves it on. Not when Uma
+  // runs from its source folder or under a test.
+  setTimeout(async () => {
+    const settings = store.getSettings();
+    if (settings.checkForUpdates === false || !(app.isPackaged || process.env.UMA_UPDATE_FEED) || !updater.due(settings.lastUpdateCheck)) return;
+    await store.updateSettings({ lastUpdateCheck: Date.now() });
+    const state = await updater.check();
+    if (state.status === 'available') send('updates:found', state);
+  }, 20000).unref?.();
   // Search by meaning is on from the start: its small model (334 MB) is fetched once, in the
   // background, unless project search or search by meaning was switched off.
   setTimeout(() => {

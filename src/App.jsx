@@ -331,6 +331,10 @@ export default function App() {
       setView('settings');
       if (section) setTimeout(() => document.getElementById(section)?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 200);
     });
+    // A newer Uma was found by the daily look: say so once, the rest is in Settings → Updates.
+    const offUpdateFound = api.onUpdateFound?.((state) => {
+      showToast(t('Uma {0} is available. See Settings → Updates.', [state.version]), 'success');
+    });
     const offNetwork = api.onNetworkStatus?.((status) => {
       setBoot((previous) => (previous ? { ...previous, network: status } : previous));
     });
@@ -367,6 +371,7 @@ export default function App() {
       offServer();
       offNetwork?.();
       offOpenSettings?.();
+      offUpdateFound?.();
       offWorkspace();
       offBenchmark();
       offBenchmarkHistory();

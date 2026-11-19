@@ -314,8 +314,23 @@ class Workspace {
 
   async resolve(relative = '.', { allowMissing = true } = {}) {
     if (typeof relative !== 'string') throw new Error('A path is required.');
-    const cleaned = relative.replace(/\\/g, '/').replace(/\0/g, '').trim();
+    let cleaned = relative.replace(/\\/g, '/').replace(/\0/g, '').trim();
     if (cleaned.includes('\0')) throw new Error('Invalid path.');
+    // The workspace's own full path, or one inside it, is the same place as the relative one: a
+    // model reads that path in its instructions and gives it back (as the folder to run a command
+    // in, for one). Every check below still applies to it.
+    if (!this.unrestricted && (path.isAbsolute(cleaned) || /^[a-zA-Z]:/.test(cleaned)) && isInside(path.resolve(cleaned), this.root)) {
+      cleaned = path.relative(this.root, path.resolve(cleaned)).split(path.sep).join('/') || '.';
+    }
+    // So is the workspace's own name in front of a path: asked for a page inside "my-site", a model
+    // wrote my-site/index.html, and the page landed in a new folder my-site inside my-site. Unless
+    // such a folder is really there, the name means the workspace.
+    if (!this.unrestricted) {
+      const [first, ...rest] = cleaned.split('/').filter((part) => part && part !== '.');
+      if (rest.length && first.toLowerCase() === path.basename(this.root).toLowerCase() && !(await fsp.stat(path.join(this.root, first)).catch(() => null))) {
+        cleaned = rest.join('/');
+      }
+    }
 
     if (this.unrestricted) {
       if (!cleaned || cleaned === '.') return this.root;

@@ -30,6 +30,7 @@ const SETTINGS_SECTIONS = [
   { id: 'settings-network', label: 'Network', icon: Network },
   { id: 'settings-user-memory', label: 'Memory', icon: BookMarked },
   { id: 'settings-memory', label: 'Chat memory', icon: BrainCircuit },
+  { id: 'settings-updates', label: 'Updates', icon: RefreshCw },
   { id: 'settings-storage', label: 'Storage', icon: Database },
   { id: 'settings-about', label: 'About', icon: Info },
 ];

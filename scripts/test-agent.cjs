@@ -653,14 +653,24 @@ async function testSkills() {
   await upgrade.seed();
   assert.equal((await upgrade.list())[0].description, 'edited by me', 'seeding never overwrites an edit');
 
-  // A skill that needs a switched-off permission is listed, but not offered to the model.
+  // A skill that needs internet access is listed, but not offered to the model while that is off:
+  // there is nothing it could do. One that needs the terminal is still offered, marked as working
+  // in part: it writes the files, and the model is told to give the commands instead of running them.
   const gated = new SkillStore({ globalDir: path.join(dir, 'gated'), store: skillStore });
   await write(path.join(dir, 'gated'), 'needs-terminal', '---\ndescription: d\nrequires: terminal\n---\nBody.');
-  await skillStore.updateSettings({ allowShell: false });
-  assert.equal((await gated.list())[0].needs, 'Terminal access');
-  assert.deepEqual(await gated.enabled(), []);
+  await write(path.join(dir, 'gated'), 'needs-web', '---\ndescription: d\nrequires: internet\n---\nBody.');
+  await write(path.join(dir, 'gated'), 'needs-both', '---\ndescription: d\nrequires: [terminal, internet]\n---\nBody.');
+  await skillStore.updateSettings({ allowShell: false, allowInternet: false });
+  const gatedList = Object.fromEntries((await gated.list()).map((skill) => [skill.name, [skill.needs, skill.partial]]));
+  assert.deepEqual(gatedList, { 'needs-both': ['Terminal access', false], 'needs-terminal': ['Terminal access', true], 'needs-web': ['Internet access', false] });
+  assert.deepEqual((await gated.enabled()).map((skill) => skill.name), ['needs-terminal']);
+  const gatedTools = new ToolRunner({ workspace, store: skillStore, onChanged: () => {}, skills: gated });
+  const inPart = await gatedTools.run('load_skill', { name: 'needs-terminal' });
+  assert.match(inPart.output, /Terminal access is off, so no command can be run[\s\S]*tell the user the exact command[\s\S]*Body\./);
+  assert.equal((await gatedTools.run('load_skill', { name: 'needs-web' })).ok, false);
   await skillStore.updateSettings({ allowShell: true });
-  assert.equal((await gated.enabled())[0].name, 'needs-terminal');
+  assert.deepEqual((await gated.enabled()).map((skill) => [skill.name, skill.partial]), [['needs-terminal', false]]);
+  assert.doesNotMatch((await gatedTools.run('load_skill', { name: 'needs-terminal' })).output, /no command can be run/);
   await skillStore.updateSettings({ allowShell: false });
 
   await fsp.rm(globalDir, { recursive: true });
@@ -712,7 +722,7 @@ async function testSkills() {
     '{"skill":"release-notes"}',
     '{"name":"write_file","arguments":{"path":"notes.md","content":"v2\\n"}}',
     'Done, following the skill.',
-  ], 'write the release notes for this project', { toolRunner: skillTools });
+  ], 'document what changed in this project for version 2', { toolRunner: skillTools });
   assert.match(run.calls[0].messages[0].content, /release-notes: Write release notes/, 'the prompt lists the skill');
   assert.doesNotMatch(run.calls[0].messages.map((item) => item.content).join('\n'), /Step one/, 'the body costs no context until it is chosen');
   assert.deepEqual(run.calls[0].responseSchema.properties.skill.enum, ['release-notes', 'none'], 'the choice is limited to real skills');
@@ -721,19 +731,28 @@ async function testSkills() {
   assert.doesNotMatch(run.calls[1].messages.map((item) => item.content).join('\n'), /Before starting/, 'the question does not linger');
   assert.equal(toolBlocks(run.message)[0].title, 'Loaded skill release-notes');
 
+  // A request that names the skill word for word loads it at once: no question, one reply less.
+  run = await chat([
+    '{"name":"write_file","arguments":{"path":"notes0.md","content":"v2\\n"}}',
+    'Done, following the skill.',
+  ], 'write the release notes for this project', { toolRunner: skillTools });
+  assert.equal(run.calls[0].responseSchema, undefined, 'the model is not asked which skill fits');
+  assert.match(run.calls[0].messages.at(-1).content, /Step one: read CHANGELOG/);
+  assert.deepEqual(toolBlocks(run.message).map((block) => block.name), ['load_skill', 'write_file']);
+
   // The model can still load one later itself, and "none" or garbage from the chooser is harmless.
   run = await chat([
     '{"skill":"none"}',
     '{"name":"load_skill","arguments":{"name":"release-notes"}}',
     '{"name":"write_file","arguments":{"path":"notes2.md","content":"v2\\n"}}',
     'Done.',
-  ], 'write the release notes for this project', { toolRunner: skillTools });
+  ], 'document what changed in this project for version 2', { toolRunner: skillTools });
   assert.deepEqual(toolBlocks(run.message).map((block) => block.name), ['load_skill', 'write_file']);
   run = await chat([
     'not json',
     '{"name":"write_file","arguments":{"path":"notes3.md","content":"v2\\n"}}',
     'Done.',
-  ], 'write the release notes for this project', { toolRunner: skillTools });
+  ], 'document what changed in this project for version 2', { toolRunner: skillTools });
   assert.equal(run.message.status, 'done');
   assert.deepEqual(toolBlocks(run.message).map((block) => block.name), ['write_file']);
   // Looking something up can only choose a web skill, even if the request names a project tool.

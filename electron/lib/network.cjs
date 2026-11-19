@@ -633,7 +633,13 @@ class NetworkManager {
       cpu: stats?.cpuPercent ?? null,
       ramUsed: stats?.ramUsedBytes ?? null,
       ramTotal: stats?.ramTotalBytes ?? os.totalmem(),
-      gpu: stats?.gpu ? { percent: stats.gpu.percent, used: stats.gpu.usedBytes, total: stats.gpu.totalBytes } : null,
+      gpu: stats?.gpu ? {
+        percent: stats.gpu.percent,
+        used: stats.gpu.usedBytes,
+        total: stats.gpu.totalBytes,
+        // Each card, on a PC with several (shown on this PC's own Status row).
+        ...(stats.gpu.cards ? { cards: stats.gpu.cards.map((card) => ({ name: card.name, percent: card.percent, used: card.usedBytes, total: card.totalBytes })) } : {}),
+      } : null,
       net: stats?.net ? { rx: stats.net.rxBps, tx: stats.net.txBps } : null,
       internet: this.own.internet,
       internetDrops: this.own.internetDrops,

@@ -78,10 +78,13 @@ for (const locale of LOCALES) {
   // A translation must keep every {placeholder} of its English key.
   const broken = keys.filter((key) => dictionary[key] && (key.match(/\{\w+\}/g) || []).some((slot) => !dictionary[key].includes(slot)));
   const unused = Object.keys(dictionary).filter((key) => !keys.includes(key));
-  if (missing.length || broken.length) {
+  // A sentence filled in with its own English text is not translated. (A name, a unit, or a list of
+  // model names may be the same in another language: only sentences count.)
+  const english = keys.filter((key) => dictionary[key] === key && (key.match(/[A-Za-z]{3,}/g) || []).length >= 6);
+  if (missing.length || broken.length || english.length) {
     problems += 1;
-    console.log(`${locale}: ${missing.length} missing, ${broken.length} with a lost {placeholder}`);
-    for (const key of [...missing, ...broken].slice(0, 15)) console.log(`   ${JSON.stringify(key)}`);
+    console.log(`${locale}: ${missing.length} missing, ${broken.length} with a lost {placeholder}, ${english.length} left in English`);
+    for (const key of [...missing, ...broken, ...english].slice(0, 15)) console.log(`   ${JSON.stringify(key)}`);
   }
   if (unused.length) console.log(`${locale}: ${unused.length} unused (text no longer in the app)`);
 }

@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Monitor } from 'lucide-react';
 import { api } from '../api.js';
 import { t } from '../i18n.js';
+import { recordGpuSample } from '../gpuHistory.js';
 
 function gigabytes(bytes) {
   return (bytes / 1024 ** 3).toFixed(1);
@@ -55,8 +56,10 @@ export default function SystemMonitor() {
 
   useEffect(() => {
     let active = true;
-    api?.systemStats?.().then((next) => { if (active) setStats(next); }).catch(() => {});
-    const off = api?.onSystemStats?.(setStats);
+    // Each reading also goes to the history behind the graph of several graphics cards (GpuCards).
+    const take = (next) => { setStats(next); recordGpuSample(next); };
+    api?.systemStats?.().then((next) => { if (active) take(next); }).catch(() => {});
+    const off = api?.onSystemStats?.(take);
     return () => {
       active = false;
       off?.();
@@ -65,6 +68,9 @@ export default function SystemMonitor() {
 
   if (!stats) return null;
   const { gpu } = stats;
+  // Several graphics cards: each card's own reading, so it shows whether they all work.
+  const cards = gpu?.cards?.length > 1 ? gpu.cards : null;
+  const perCard = cards ? `\n${cards.map((card, index) => `${index + 1}. ${card.name}: ${card.percent}% · ${gigabytes(card.usedBytes)}/${gigabytes(card.totalBytes)} GB`).join('\n')}` : '';
   return (
     <div className="system-monitor" aria-label={t('System usage')}>
       <Reading
@@ -82,12 +88,17 @@ export default function SystemMonitor() {
       />
       {gpu ? (
         <>
-          <Reading label={t('GPU')} value={`${gpu.percent}%`} percent={gpu.percent} title={t('GPU use, all programs')} />
+          <Reading
+            label={cards ? `${t('GPU')} ×${cards.length}` : t('GPU')}
+            value={cards && cards.length <= 4 ? `${cards.map((card) => card.percent).join(' · ')}%` : `${gpu.percent}%`}
+            percent={gpu.percent}
+            title={`${t('GPU use, all programs')}${perCard}`}
+          />
           <Reading
             label={t('VRAM')}
             value={`${gigabytes(gpu.usedBytes)}/${gigabytes(gpu.totalBytes)} GB`}
             percent={(gpu.usedBytes / gpu.totalBytes) * 100}
-            title={t('Graphics memory in use, all programs')}
+            title={`${t('Graphics memory in use, all programs')}${perCard}`}
           />
         </>
       ) : (

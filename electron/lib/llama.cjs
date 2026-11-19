@@ -10,10 +10,12 @@ const { DEFAULTS, buildServerArgs, cacheTypeFixes, draftCompatibility, draftArgs
 
 // The first llama.cpp build with the MoE cache (--moe-cache-mib, --moe-cache-cpu-share).
 const MOE_CACHE_BUILD = 12191;
+// From this engine build on, what was read before a picture can be reused after it (see streamChat).
+const CACHE_AFTER_IMAGE_BUILD = 12318;
 const MiB = 1024 * 1024;
 const { estimateMemory } = require('./memory.cjs');
-const { freeVramBytes } = require('./hardware.cjs');
-const { planPlacement, placementArgs, parseDeviceList } = require('./placement.cjs');
+const { freeVramBytes, gpuSummary } = require('./hardware.cjs');
+const { planPlacement, placementArgs, parseDeviceList, localCards } = require('./placement.cjs');
 const { t } = require('./i18n.cjs');
 
 // Chat memory (chatMemory.cjs): what the engine has read of a chat is saved to disk a few seconds
@@ -40,9 +42,21 @@ async function freePort(start = 8099) {
   throw new Error(t('Could not find a free local port.'));
 }
 
+/** What `llama-server --list-devices` prints: the devices this engine can put a model on. */
+function listEngineDevices(serverPath) {
+  return new Promise((resolve) => {
+    require('node:child_process').execFile(serverPath, ['--list-devices'], {
+      cwd: path.dirname(serverPath), windowsHide: true, timeout: 30000, maxBuffer: 1024 * 1024,
+    }, (error, stdout, stderr) => resolve(`${stdout}\n${stderr}`));
+  });
+}
+
 class LlamaManager {
-  constructor({ store, runtime, emit, logsDir, modelInfo, getModel = null, freeVram = freeVramBytes, freeRam = () => os.freemem(), network = null, chatMemory = null, batchTuner = null }) {
+  constructor({ store, runtime, emit, logsDir, modelInfo, getModel = null, freeVram = freeVramBytes, freeRam = () => os.freemem(), network = null, chatMemory = null, batchTuner = null, listDevices = listEngineDevices }) {
     this.store = store;
+    // This PC's graphics cards for the current load, when it has several (see localGpus).
+    this.listDevices = listDevices;
+    this.cards = { used: [], missing: [] };
     // Picks the physical batch size from measured reading speeds (null: the setting is used as it is).
     this.batchTuner = batchTuner;
     this.batchTune = null;
@@ -98,8 +112,10 @@ class LlamaManager {
       // How the model is divided between this PC and its helpers, when a plan was used.
       placement: this.child && this.placement ? {
         mode: this.placement.mode,
-        devices: this.placement.devices.map((device) => ({ name: device.name, label: device.remote ? device.label : '', kind: device.kind, wantMB: device.wantMB })),
+        devices: this.placement.devices.map((device) => ({ name: device.name, label: device.remote ? device.label : '', card: device.remote ? '' : device.card || '', kind: device.kind, wantMB: device.wantMB })),
       } : null,
+      // Graphics cards in this PC that the installed engine does not list, so nothing can run on them.
+      unusedGpus: this.child ? this.cards.missing : [],
       // Settings Uma changed for this model so it can load (see cacheTypeFixes).
       cacheFix: this.child ? this.cacheFix || '' : '',
       // The small model guessing ahead for this one, and where it runs.
@@ -246,17 +262,23 @@ class LlamaManager {
    *   and which still keeps every helper's RAM reserve;
    * - if the load still fails while helpers take part, or a helper's engine stopped (llama.cpp then
    *   ends with "Remote RPC server crashed"), the model loads on this PC alone.
+   * A PC with several graphics cards and no helpers goes the same way: fixed shares, then a fill
+   * plan, and last llama.cpp's own split, with no plan of Uma's at all.
    */
   async startWithHelpers(model, runtimeConfig, launchKey) {
     let lastError;
-    for (const attempt of [{}, { plan: 'fill' }, { helpers: false }]) {
+    for (const attempt of [{}, { plan: 'fill' }, { helpers: false }, { helpers: false, plan: false }]) {
       if (attempt.plan === 'fill' && this.placement?.mode !== 'balanced') continue;
-      if (attempt.helpers === false && !this.helpers.servers.length) break;
+      // No helpers took part: there are none to leave out.
+      if (attempt.helpers === false && attempt.plan === undefined && !this.helpers.servers.length) continue;
+      // No plan was used: there is none to drop.
+      if (attempt.plan === false && !this.placement) break;
       try {
-        if (attempt.plan === 'fill') this.log('[uma] the balanced helper plan did not load; retrying with a fill plan');
+        if (attempt.plan === 'fill') this.log(`[uma] the balanced plan for ${this.helpers.servers.length ? 'the helpers' : "this PC's graphics cards"} did not load; retrying with a fill plan`);
+        if (attempt.plan === false) this.log("[uma] the load failed with Uma's plan for this PC's graphics cards; loading again with llama.cpp's own split");
         return await this.startServer(model, runtimeConfig, launchKey, attempt);
       } catch (err) {
-        if (err.code !== 'SERVER_FAILED' || !this.helpers.servers.length) throw err;
+        if (err.code !== 'SERVER_FAILED' || (!this.helpers.servers.length && !this.placement)) throw err;
         lastError = err;
         const helperFailed = this.logs.some((line) => /ggml-rpc|RPC server|rpc_/i.test(line));
         if (attempt.helpers === undefined && helperFailed) {
@@ -280,11 +302,11 @@ class LlamaManager {
    * but the routed experts is there (weights, context cache, working buffers, a draft model, and
    * 1 GB to spare), and the CPU share for the loading mode.
    */
-  async planMoeCache(settings, info, runtimeConfig) {
+  async planMoeCache(settings, info, runtimeConfig, freeBytes = null) {
     const build = Number(String(runtimeConfig.version || '').match(/^b(\d+)$/)?.[1]) || 0;
     if (settings.moeCache === 'off' || settings.gpuOffload === false || settings.gpuLayers !== undefined) return null;
     if (runtimeConfig.backend === 'cpu' || build < MOE_CACHE_BUILD || !info?.expertCount || !info.expertBytes) return null;
-    const free = await this.freeVram().catch(() => 0);
+    const free = freeBytes ?? await this.freeVram().catch(() => 0);
     if (!free) return null;
     const full = estimateMemory(info, { ...DEFAULTS, ...settings, gpuLayers: 999 });
     const rest = Math.max(0, full.gpuBytes - info.expertBytes) + (this.draft ? this.draft.memoryMB * MiB : 0);
@@ -308,10 +330,10 @@ class LlamaManager {
     if (this.batchTuner && this.batchTune) this.batchTuner.record(this.batchTune.key, this.batchTune.size, Number(timings?.prompt_n) || 0, Number(timings?.prompt_ms) || 0);
   }
 
-  async allLayersFit(model, settings, extraBytes = 0) {
+  async allLayersFit(model, settings, extraBytes = 0, freeBytes = null) {
     if (!this.modelInfo || settings.gpuLayers !== undefined) return false;
     try {
-      const free = await this.freeVram();
+      const free = freeBytes ?? await this.freeVram();
       if (!free) return false;
       const info = await this.modelInfo(model.id);
       const estimate = estimateMemory(info, { ...DEFAULTS, ...settings, gpuLayers: 999 });
@@ -319,6 +341,40 @@ class LlamaManager {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * This PC's graphics cards as the installed engine lists them, when the PC has more than one
+   * (say an RTX 3060 and two Tesla P40). `used` is [] on a PC with one card, and the load then goes
+   * as it always did. `missing` names cards the engine does not list: nothing can be put on those,
+   * so their memory must not be counted, and the user is told (status().unusedGpus).
+   */
+  async localGpus(runtimeConfig, settings) {
+    const names = (this.runtime?.hardware?.gpus || []).map((card) => card.name);
+    if (names.length < 2 || runtimeConfig.backend === 'cpu' || settings.gpuOffload === false) return { used: [], missing: [] };
+    const output = await this.listDevices(runtimeConfig.serverPath).catch(() => '');
+    const found = localCards(parseDeviceList(output), names);
+    if (!found.used.length) {
+      this.log(`[uma] this PC has ${names.length} graphics cards (${gpuSummary(names)}), but the engine listed none of them; llama.cpp chooses the split itself`);
+      return { used: [], missing: [] };
+    }
+    this.log(`[uma] graphics cards the engine can use: ${found.used.map((device) => `${device.name} ${device.card} (${device.freeMB} of ${device.totalMB} MiB free)`).join(', ')}`);
+    if (found.missing.length) {
+      this.log(`[uma] NOT usable with this engine (${runtimeConfig.backend}${runtimeConfig.version ? ` ${runtimeConfig.version}` : ''}): ${gpuSummary(found.missing)}. The engine does not list ${found.missing.length > 1 ? 'these cards' : 'this card'}, so nothing is put there. A Tesla P40 or GTX 10 card needs a CUDA 12 engine (CUDA 13 has no code for them); Vulkan cannot see a card in compute-only (TCC) mode.`);
+    }
+    return found;
+  }
+
+  /** How the model is shared between this PC's graphics cards (see placement.cjs), with the plan written to the log. */
+  planCards(needMB, { fill = false, draftMB = 0 } = {}) {
+    const mainFreeRamMB = Math.round(this.freeRam() / 1024 / 1024);
+    const plan = planPlacement({ devices: this.cards.used, needMB, mainFreeRamMB, forceFill: fill, draftMB });
+    this.log(`[uma] plan for ${this.cards.used.length} graphics cards (${plan.mode === 'balanced' ? 'the model fits: shared in proportion to free memory' : 'the cards are filled, the rest stays in RAM'}): the model needs about ${needMB || '?'} MiB; ${plan.gpuRoomMB} MiB is free on the cards in total`);
+    if (draftMB) this.log(plan.draftDevice ? `[uma]   the draft model (about ${draftMB} MiB) runs on ${plan.draftDevice}` : '[uma]   no card has room for the draft model; it follows the main model');
+    for (const device of plan.devices) {
+      this.log(`[uma]   ${device.name} ${device.card}: ${plan.mode === 'balanced' ? `about ${device.wantMB} MiB (${Math.round(device.share * 100)}%)` : `up to ${device.wantMB} MiB`}, keeping ${device.targetMB} MiB free`);
+    }
+    return plan;
   }
 
   /**
@@ -405,7 +461,19 @@ class LlamaManager {
     this.apiKey = crypto.randomBytes(24).toString('hex');
     this.draft = launchKey && this.draftFailedKey === launchKey ? null : await this.draftFor(model, settings, info);
     const draftBytes = this.draft ? this.draft.memoryMB * 1024 * 1024 : 0;
-    const fitsHere = await this.allLayersFit(model, settings, draftBytes);
+    // Several graphics cards in this PC: what the engine lists of them is what counts (see localGpus).
+    this.cards = await this.localGpus(runtimeConfig, settings);
+    const several = this.cards.used.length > 1;
+    if (this.cards.used.length) this.compute.gpuName = gpuSummary(this.cards.used.map((device) => device.card)).slice(0, 100);
+    const draftMB = this.draft?.memoryMB || 0;
+    // What the whole model needs on GPUs, or 0 when that cannot be worked out (the cards are then filled).
+    const needMB = several && info && settings.gpuLayers === undefined
+      ? Math.ceil(estimateMemory(info, { ...DEFAULTS, ...settings, gpuLayers: 999 }).gpuBytes / MiB) || 0
+      : 0;
+    const fitsHere = several
+      // On several cards "fits" means with room to spare on each: fixed shares cannot be adjusted.
+      ? needMB > 0 && planPlacement({ devices: this.cards.used, needMB, draftMB }).mode === 'balanced'
+      : await this.allLayersFit(model, settings, draftBytes, this.cards.used.length ? this.cards.used[0].freeMB * MiB : null);
     this.helpers = !useHelpers
       // After a helper failed: this PC alone, and the helpers that were tried are reported as left out.
       ? { servers: [], details: [], skipped: [...(previousHelpers.skipped || []), ...(previousHelpers.details || []).map((item) => item.label)], mismatched: previousHelpers.mismatched || [] }
@@ -413,10 +481,14 @@ class LlamaManager {
         ? await this.network.helpersForLaunch({ fitsHere: fitsHere && runtimeConfig.backend !== 'cpu' })
         : { servers: [], skipped: [], details: [] };
     // With helpers the engine spreads the layers over every device, steered by Uma's placement plan.
-    const allLayers = fitsHere && !this.helpers.servers.length;
-    this.placement = plan && this.helpers.servers.length && settings.gpuLayers === undefined
-      ? await this.planHelpers(model, settings, runtimeConfig, { fill: plan === 'fill', draftMB: this.draft?.memoryMB || 0 })
-      : null;
+    // So does a PC with several graphics cards: the cards get fixed shares when the model fits on
+    // them, and are filled one after the other when it does not.
+    const allLayers = fitsHere && !this.helpers.servers.length && !several;
+    this.placement = !plan || settings.gpuLayers !== undefined
+      ? null
+      : this.helpers.servers.length
+        ? await this.planHelpers(model, settings, runtimeConfig, { fill: plan === 'fill', draftMB })
+        : several ? this.planCards(needMB, { fill: plan === 'fill', draftMB }) : null;
     if (this.placement?.unusable) {
       this.placement = null;
       this.helpers = { servers: [], details: [], skipped: [...this.helpers.skipped, ...this.helpers.details.map((item) => item.label)], mismatched: this.helpers.mismatched || [] };
@@ -428,12 +500,15 @@ class LlamaManager {
     // A mixture-of-experts model that does not fit on this PC's GPU: its routed experts stay in RAM
     // and the GPU keeps a cache of the most used ones. At the same VRAM this wrote 92.2 tok/s where
     // llama.cpp's usual split wrote 54.8 (LFM2-8B-A1B, RTX 2070, b12318). Not with helper PCs yet:
-    // over the network the cache's uploads are untested.
-    this.moeCache = !fitsHere && !this.helpers.servers.length && !this.placement && launchKey !== this.moeFailedKey
-      ? await this.planMoeCache(settings, info, runtimeConfig)
+    // over the network the cache's uploads are untested. Nor over several graphics cards, where the
+    // experts usually fit anyway; with one card of several usable, that card's free memory counts.
+    this.moeCache = !fitsHere && !this.helpers.servers.length && !this.placement && !several && launchKey !== this.moeFailedKey
+      ? await this.planMoeCache(settings, info, runtimeConfig, this.cards.used.length ? this.cards.used[0].freeMB * MiB : null)
       : null;
     for (const note of fixes.notes) this.log(`[uma] ${note}`);
     this.cacheFix = fixes.changed;
+    // The engine's build number, from the folder Uma installed it in (llama-b12318-cuda): 0 when unknown.
+    this.engineBuild = Number(/llama-b(\d+)/i.exec(String(runtimeConfig.serverPath || ''))?.[1]) || 0;
     const args = [
       // --rpc first: llama-server reads arguments in order, and -dev can only name RPC devices once
       // --rpc has registered them.
@@ -809,8 +884,13 @@ class LlamaManager {
     }, 5000);
     let reader;
     // Reusing the cache after an image left Qwen3.8 stopping after one word on every later reply,
-    // so the request right after one reads its prompt in full.
-    const cachePrompt = !this.afterImage;
+    // so the request right after one read its prompt in full: three to five seconds at every step
+    // of a task with screenshots (measured: 36 s for a task that takes 22 s without it). With
+    // engine b12318 the replies are whole again (Qwen3.8-9B: twenty-one replies after pictures, and
+    // follow-up messages), so only an older engine still reads in full.
+    // UMA_CACHE_AFTER_IMAGE=0 or 1 forces one or the other, to try an engine.
+    const reuseAfterImage = process.env.UMA_CACHE_AFTER_IMAGE ? process.env.UMA_CACHE_AFTER_IMAGE === '1' : this.engineBuild >= CACHE_AFTER_IMAGE_BUILD;
+    const cachePrompt = reuseAfterImage || !this.afterImage;
     this.afterImage = messages.some((message) => Array.isArray(message.content));
     try {
       const response = await fetch(`http://127.0.0.1:${this.port}/v1/chat/completions`, {

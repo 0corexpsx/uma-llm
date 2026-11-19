@@ -13,22 +13,25 @@ function cpuTimes() {
   return { idle, total };
 }
 
-function queryNvidia() {
-  return new Promise((resolve) => {
-    execFile(
-      'nvidia-smi',
-      ['--query-gpu=utilization.gpu,memory.used,memory.total', '--format=csv,noheader,nounits'],
-      { timeout: 4000, windowsHide: true },
-      (error, stdout) => {
-        if (error) {
-          resolve(null);
-          return;
-        }
-        const [percent, used, total] = String(stdout).split(/\r?\n/)[0].split(',').map((value) => Number(value.trim()));
-        resolve(Number.isFinite(used) && total > 0 ? { percent, usedBytes: used * 1024 ** 2, totalBytes: total * 1024 ** 2 } : null);
-      },
-    );
-  });
+/**
+ * One reading for all of a PC's NVIDIA cards: memory is added up, and the percentage is the
+ * busiest card's (layers shared between cards run one card after the other, so an average would
+ * read low while a card is flat out). `cards` lists each card when there are several.
+ */
+function gpuReading(cards) {
+  if (!cards.length) return null;
+  const each = cards.map((card) => ({ name: card.name, percent: card.percent, usedBytes: card.usedMB * 1024 ** 2, totalBytes: card.totalMB * 1024 ** 2 }));
+  return {
+    percent: Math.max(...each.map((card) => card.percent)),
+    usedBytes: each.reduce((sum, card) => sum + card.usedBytes, 0),
+    totalBytes: each.reduce((sum, card) => sum + card.totalBytes, 0),
+    ...(each.length > 1 ? { cards: each } : {}),
+  };
+}
+
+async function queryNvidia() {
+  const { nvidiaCards } = require('./hardware.cjs');
+  return gpuReading(await nvidiaCards(4000));
 }
 
 function runText(file, args) {
@@ -214,4 +217,4 @@ class SystemStats {
   }
 }
 
-module.exports = { SystemStats, NetworkCounter, queryNvidia, queryAppleGpu };
+module.exports = { SystemStats, NetworkCounter, queryNvidia, queryAppleGpu, gpuReading };

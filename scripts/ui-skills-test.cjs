@@ -92,7 +92,10 @@ async function run() {
   await sleep(300);
   log(`library opened: ${await js("__text('.skill-library-count')")}; ${await js("__count('.skill-library-row')")} rows`);
   await js("__type('.skill-library-modal .skill-search-box input', 'docker compose')");
-  await sleep(1000);
+  // Only skills their authors marked safe: installing one of the others asks first, in a dialog
+  // that nobody answers here.
+  await js("(() => { const select = document.querySelector('.skill-library-search select'); Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(select, 'safe'); select.dispatchEvent(new Event('change', { bubbles: true })); return true; })()");
+  await sleep(1200);
   const name = (await js("__text('.skill-library-row .skill-library-name')")).split('\n')[0].trim();
   log(`search "docker compose": ${await js("__text('.skill-library-count')")}; first result: ${name}`);
   await shot('skills-library.png');
@@ -105,8 +108,9 @@ async function run() {
   // The installed list has a filter box and the new skill, which can be removed again.
   await js(`__type('#settings-skills .skill-installed-filter input', ${JSON.stringify(name)})`);
   await sleep(400);
-  const filtered = await js("__count('#settings-skills .setting-row')");
-  assert(filtered === 1, `the filter shows ${filtered} skills instead of 1`);
+  // (Another skill may hold the same words in its description; the one just installed must be there.)
+  const filtered = await js(`[...document.querySelectorAll('#settings-skills .setting-row')].filter((row) => row.innerText.includes(${JSON.stringify(`${name} ·`)})).length`);
+  assert(filtered === 1, `the filter shows ${filtered} skills named ${name} instead of 1`);
   await shot('skills-filtered.png');
   await js("__click('#settings-skills .skill-controls button[title=\"Move this skill to the Recycle Bin\"]')");
   await sleep(1500);

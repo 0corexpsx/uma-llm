@@ -12,6 +12,37 @@ function run(file, args, timeout = 5000) {
   });
 }
 
+const NVIDIA_QUERY = ['--query-gpu=name,memory.total,memory.free,memory.used,utilization.gpu', '--format=csv,noheader,nounits'];
+
+/**
+ * nvidia-smi's answer to NVIDIA_QUERY, one line per card ("Tesla P40, 24576, 24210, 366, 0"), as
+ * [{ name, totalMB, freeMB, usedMB, percent }]. A PC can hold several cards, and they need not
+ * be alike.
+ */
+function parseNvidiaCards(text) {
+  const cards = [];
+  for (const line of String(text || '').split(/\r?\n/)) {
+    const [name, total, free, used, percent] = line.split(',').map((value) => value.trim());
+    const totalMB = Number(total);
+    if (!name || !(totalMB > 0)) continue;
+    cards.push({ name, totalMB, freeMB: Number(free) || 0, usedMB: Number(used) || 0, percent: Number(percent) || 0 });
+  }
+  return cards;
+}
+
+/** Every NVIDIA card in this PC with its memory and how busy it is, or [] without nvidia-smi. */
+async function nvidiaCards(timeout = 5000) {
+  if (process.platform === 'darwin') return [];
+  return parseNvidiaCards(await run('nvidia-smi', NVIDIA_QUERY, timeout));
+}
+
+/** One name for several cards: "NVIDIA GeForce RTX 3060 + 2× Tesla P40". */
+function gpuSummary(names) {
+  const counts = new Map();
+  for (const name of names.filter(Boolean)) counts.set(name, (counts.get(name) || 0) + 1);
+  return [...counts].map(([name, count]) => (count > 1 ? `${count}× ${name}` : name)).join(' + ');
+}
+
 /** AMD and Intel GPUs on Linux report VRAM in sysfs; the card with the most memory wins. */
 async function amdVram() {
   const fsp = require('node:fs/promises');
@@ -39,17 +70,15 @@ async function detectHardware(force = false) {
   let cudaVersion = '';
   let cudaLibs = [];
   let appleSilicon = false;
+  // Every graphics card, when there are several: the model can be shared between them.
+  let gpus = [];
 
   if (process.platform !== 'darwin') {
-    const nvidia = await run('nvidia-smi', [
-      '--query-gpu=name,memory.total',
-      '--format=csv,noheader,nounits',
-    ]);
-    if (nvidia) {
-      const first = nvidia.split(/\r?\n/)[0];
-      const [name, memory] = first.split(',').map((value) => value.trim());
-      gpu = name;
-      vramGB = Math.round((Number(memory) / 1024) * 10) / 10;
+    const cards = await nvidiaCards();
+    if (cards.length) {
+      gpus = cards.map((card) => ({ name: card.name, vramGB: Math.round((card.totalMB / 1024) * 10) / 10 }));
+      gpu = gpuSummary(cards.map((card) => card.name));
+      vramGB = Math.round((cards.reduce((sum, card) => sum + card.totalMB, 0) / 1024) * 10) / 10;
       // Newer drivers label this "CUDA UMD Version"; the plain header form is the older one.
       const details = await run('nvidia-smi', [], 8000);
       cudaVersion = details.match(/CUDA(?: UMD)? Version\s*:\s*(\d+\.\d+)/i)?.[1] || '';
@@ -114,8 +143,10 @@ async function detectHardware(force = false) {
     ramGB,
     gpu: gpu || '',
     vramGB,
+    gpus: gpus.length ? gpus : gpu ? [{ name: gpu, vramGB }] : [],
     hasGpu: Boolean(gpu),
-    nvidia: /nvidia/i.test(gpu),
+    // nvidia-smi answering is the proof: an older card is named "Tesla P40", without "NVIDIA".
+    nvidia: gpus.length > 0 || /nvidia/i.test(gpu),
     cudaVersion,
     cudaLibs,
     appleSilicon,
@@ -126,12 +157,15 @@ async function detectHardware(force = false) {
   return cached;
 }
 
-/** VRAM free right now, in bytes, or 0 when this GPU cannot report it. */
+/**
+ * VRAM free right now, in bytes, or 0 when this GPU cannot report it. With several cards: the one
+ * with the most free memory, which is what a model that must sit on one card can count on. (How a
+ * model is shared between cards is planned from the engine's own list: see LlamaManager.localGpus.)
+ */
 async function freeVramBytes() {
   if (process.platform === 'darwin') return 0;
-  const output = await run('nvidia-smi', ['--query-gpu=memory.free', '--format=csv,noheader,nounits']);
-  const mib = Number(output.split(/\r?\n/)[0]);
-  if (Number.isFinite(mib) && mib > 0) return mib * 1024 * 1024;
+  const mib = Math.max(0, ...(await nvidiaCards()).map((card) => card.freeMB));
+  if (mib > 0) return mib * 1024 * 1024;
   const amd = process.platform === 'linux' ? await amdVram() : null;
   return amd ? Math.max(0, amd.totalBytes - amd.usedBytes) : 0;
 }
@@ -152,4 +186,4 @@ function recommendModel(models, hardware) {
   return models.find((model) => model.id === 'qwen25-15b')?.id || models[0].id;
 }
 
-module.exports = { detectHardware, recommendModel, freeVramBytes, amdVram };
+module.exports = { detectHardware, recommendModel, freeVramBytes, amdVram, nvidiaCards, parseNvidiaCards, gpuSummary };

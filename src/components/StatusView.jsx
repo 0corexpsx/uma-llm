@@ -101,7 +101,13 @@ function Row({ pc, self = false }) {
         />
       </div>
       <div className="status-cell" role="cell" data-label={t('GPU')}>
-        <Meter value={`${stats?.gpu?.percent}%`} percent={stats?.gpu ? stats.gpu.percent : null} title={stats && !stats.gpu ? t('GPU and VRAM readings need an NVIDIA GPU') : t('GPU use, all programs')} />
+        <Meter
+          value={stats?.gpu?.cards?.length > 1 && stats.gpu.cards.length <= 4 ? `${stats.gpu.cards.map((card) => card.percent).join(' · ')}%` : `${stats?.gpu?.percent}%`}
+          percent={stats?.gpu ? stats.gpu.percent : null}
+          title={stats && !stats.gpu
+            ? t('GPU and VRAM readings need an NVIDIA GPU')
+            : `${t('GPU use, all programs')}${(stats?.gpu?.cards || []).map((card, index) => `\n${index + 1}. ${card.name}: ${card.percent}% · ${gigabytes(card.used || 0)} / ${gigabytes(card.total)} GB`).join('')}`}
+        />
       </div>
       <div className="status-cell" role="cell" data-label={t('VRAM')}>
         <Meter

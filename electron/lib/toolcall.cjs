@@ -5,7 +5,7 @@
 const TOOL_NAMES = new Set([
   'list_files', 'read_file', 'file_info', 'write_file', 'append_file', 'replace_in_file',
   'create_folder', 'move_file', 'delete_file', 'search_files', 'run_command', 'check_environment', 'web_search', 'fetch_url', 'load_skill', 'read_skill_file', 'remember', 'look_at_screen', 'look_at_page',
-  'mouse', 'keyboard', 'focus_window', 'wait', 'find_on_screen', 'click_text',
+  'mouse', 'keyboard', 'focus_window', 'wait', 'find_on_screen', 'click_text', 'save_document',
 ]);
 
 const NAME_ALTERNATION = [...TOOL_NAMES].join('|');
@@ -29,6 +29,7 @@ const TOOL_ARGUMENTS = {
     properties: { path: PATH, find: { type: 'string' }, replace: { type: 'string' }, all: { type: 'boolean' } },
     required: ['path', 'find', 'replace'],
   },
+  save_document: { properties: { path: PATH, content: { type: 'string' }, from: PATH, title: { type: 'string' } }, required: ['path'] },
   create_folder: { properties: { path: PATH }, required: ['path'] },
   move_file: { properties: { from: PATH, to: PATH }, required: ['from', 'to'] },
   delete_file: { properties: { path: PATH }, required: ['path'] },
@@ -38,7 +39,7 @@ const TOOL_ARGUMENTS = {
   fetch_url: { properties: { url: { type: 'string' } }, required: ['url'] },
   read_skill_file: { properties: { name: { type: 'string' }, path: PATH, start_line: { type: 'integer' } }, required: ['name', 'path'] },
   remember: { properties: { text: { type: 'string' } }, required: ['text'] },
-  look_at_screen: { properties: { window: { type: 'string' } }, required: [] },
+  look_at_screen: { properties: { window: { type: 'string' }, zoom: { type: 'array', items: { type: 'integer' }, minItems: 4, maxItems: 4 } }, required: [] },
   look_at_page: { properties: { path: PATH, url: { type: 'string' } }, required: [] },
   mouse: {
     properties: {
@@ -61,7 +62,7 @@ const EDIT_TOOLS = ['write_file', 'append_file', 'replace_in_file'];
 function allowedTools(settings, skillNames = [], { vision = false } = {}) {
   const names = [...INSPECT_TOOLS, 'check_environment'];
   if (skillNames.length) names.push('load_skill', 'read_skill_file');
-  if (settings.allowEdits) names.push(...EDIT_TOOLS, 'create_folder', 'move_file');
+  if (settings.allowEdits) names.push(...EDIT_TOOLS, 'create_folder', 'move_file', 'save_document');
   if (settings.allowDelete) names.push('delete_file');
   if (settings.allowShell) names.push('run_command');
   if (settings.allowInternet) names.push('web_search', 'fetch_url');
@@ -264,7 +265,11 @@ function blankForeignFences(text) {
 
 function extractToolCall(rawText, { complete = true } = {}) {
   const text = stripThink(rawText);
-  const finish = (call, at) => ({ ...call, cleanText: text.slice(0, at).trim() });
+  // What the model said before its call. A reply can hold a call that cannot be read (cut off, or
+  // with broken JSON) and then one that can: the words end where the first of them starts, or the
+  // unreadable one was shown to the user as the answer, raw.
+  const firstMarker = text.search(new RegExp(EXPLICIT_MARKER.source, 'i'));
+  const finish = (call, at) => ({ ...call, cleanText: text.slice(0, firstMarker >= 0 ? Math.min(at, firstMarker) : at).trim() });
 
   for (const marker of text.matchAll(EXPLICIT_MARKER)) {
     const call = callAt(text, marker.index + marker[0].length, complete);
@@ -295,6 +300,54 @@ function extractToolCall(rawText, { complete = true } = {}) {
     if (call) return finish(call, line.index);
   }
   return null;
+}
+
+/**
+ * A write_file or append_file call cut off by the reply limit in the middle of its content: the
+ * file, and the text that arrived (`closed` when the whole content arrived and only the end of the
+ * call is missing). Null when the path or the start of the content did not arrive.
+ * A file longer than one reply can then be saved in parts instead of being asked for again whole.
+ */
+function cutOffWrite(rawText) {
+  const text = stripThink(rawText);
+  const starts = [text.search(new RegExp(EXPLICIT_MARKER.source, 'i')), text.search(/^[ \t]*\{\s*"(?:name|tool)"\s*:/m)].filter((index) => index >= 0);
+  if (!starts.length) return null;
+  const at = Math.min(...starts);
+  const body = text.slice(at);
+  const name = body.match(/"(?:name|tool|tool_name)"\s*:\s*"(write_file|append_file|save_document)"/)?.[1];
+  const file = body.match(/"path"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  const opening = body.match(/"content"\s*:\s*"/);
+  // The path must stand before the content: after it, a "path" could be part of the file's text.
+  if (!name || !file || !opening || file.index > opening.index) return null;
+  const escapes = { n: '\n', t: '\t', r: '\r', b: '\b', f: '\f' };
+  let content = '';
+  let closed = false;
+  for (let index = opening.index + opening[0].length; index < body.length;) {
+    const char = body[index];
+    if (char === '"') {
+      closed = true;
+      break;
+    }
+    if (char !== '\\') {
+      content += char;
+      index += 1;
+      continue;
+    }
+    // An escape cut in half is left out.
+    const next = body[index + 1];
+    if (next === undefined) break;
+    if (next === 'u') {
+      const code = body.slice(index + 2, index + 6);
+      if (!/^[0-9a-fA-F]{4}$/.test(code)) break;
+      content += String.fromCharCode(parseInt(code, 16));
+      index += 6;
+    } else {
+      content += escapes[next] ?? next;
+      index += 2;
+    }
+  }
+  const call = normalizeCall({ name, arguments: { path: parseLoose(`"${file[1]}"`) ?? file[1], content } });
+  return call ? { name, path: call.args.path, content, closed, cleanText: text.slice(0, at).trim() } : null;
 }
 
 /** True when the text began a tool call that could not be parsed (usually truncated). */
@@ -380,6 +433,7 @@ module.exports = {
   toolCallSchema,
   stripThink,
   extractToolCall,
+  cutOffWrite,
   hasToolAttempt,
   StreamFilter, INPUT_TOOLS, TOOL_ARGUMENTS,
 };

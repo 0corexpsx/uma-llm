@@ -2,6 +2,7 @@ const os = require('node:os');
 const { execFile } = require('node:child_process');
 const { newId } = require('./util.cjs');
 const { queryAppleGpu } = require('./systemStats.cjs');
+const { nvidiaCards, gpuSummary } = require('./hardware.cjs');
 const { t } = require('./i18n.cjs');
 
 function execJson(file, args, timeout = 4000) {
@@ -55,21 +56,14 @@ async function sampleGpu() {
       memoryTotalMB: Math.round(gpu.totalBytes / 1024 / 1024),
     };
   }
-  const data = await new Promise((resolve) => {
-    execFile(
-      'nvidia-smi',
-      ['--query-gpu=name,utilization.gpu,memory.used,memory.total', '--format=csv,noheader,nounits'],
-      { timeout: 3000, windowsHide: true, maxBuffer: 64 * 1024 },
-      (error, stdout) => resolve(error ? '' : String(stdout || '').trim()),
-    );
-  });
-  if (!data) return null;
-  const [name, util, used, total] = data.split(/\r?\n/)[0].split(',').map((part) => part.trim());
+  // Every NVIDIA card: memory added up, the busiest card's percentage (see gpuReading).
+  const cards = await nvidiaCards(3000);
+  if (!cards.length) return null;
   return {
-    name,
-    utilization: Number(util) || 0,
-    memoryUsedMB: Number(used) || 0,
-    memoryTotalMB: Number(total) || 0,
+    name: gpuSummary(cards.map((card) => card.name)),
+    utilization: Math.max(...cards.map((card) => card.percent)),
+    memoryUsedMB: cards.reduce((sum, card) => sum + card.usedMB, 0),
+    memoryTotalMB: cards.reduce((sum, card) => sum + card.totalMB, 0),
   };
 }
 

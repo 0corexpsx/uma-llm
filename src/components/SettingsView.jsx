@@ -10,6 +10,7 @@ import NetworkSection from './NetworkSection.jsx';
 import SkillsSection from './SkillsSection.jsx';
 import ProjectSearchRow from './ProjectSearchRow.jsx';
 import ChatMemorySection from './ChatMemorySection.jsx';
+import UpdateSection from './UpdateSection.jsx';
 import MemorySection from './MemorySection.jsx';
 import PcAccessWarning from './PcAccessWarning.jsx';
 import InputWarning from './InputWarning.jsx';
@@ -172,7 +173,7 @@ export default function SettingsView({ boot, onRefreshBoot, showToast }) {
             <SettingRow
               icon={Terminal}
               title={t('Allow terminal commands')}
-              description={t('Lets the agent run {0}. With full PC access it can operate anywhere; keep this off unless you need it.', [OS.shell])}
+              description={t('Lets the agent run {0}. Once this is on, commands run without asking each time, downloads and installs included. With full PC access it can operate anywhere; keep this off unless you need it.', [OS.shell])}
               danger
             >
               <Toggle
@@ -186,7 +187,7 @@ export default function SettingsView({ boot, onRefreshBoot, showToast }) {
               <SettingRow
                 icon={Terminal}
                 title={t('Ask before each command')}
-                description={t('Off: every terminal command runs without asking, downloads and installs included. Turned off by "Don\'t ask again" in a command dialog.')}
+                description={t('Off: every terminal command runs without asking, downloads and installs included. It goes off when you allow terminal commands; turn it on to approve each command yourself.')}
                 danger={settings.askBeforeCommands === false}
               >
                 <Toggle
@@ -383,6 +384,8 @@ export default function SettingsView({ boot, onRefreshBoot, showToast }) {
 
         <ChatMemorySection settings={settings} update={update} showToast={showToast} />
 
+        <UpdateSection settings={settings} update={update} showToast={showToast} />
+
         <section className="settings-section" id="settings-storage">
           <div className="settings-section-head">
             <SectionLabel>{t('Storage')}</SectionLabel>
@@ -425,7 +428,7 @@ export default function SettingsView({ boot, onRefreshBoot, showToast }) {
               <strong>{t('Uma LLM')}{' '}{boot.appVersion}</strong>
               <span className="about-copyright">{t('© 2026 Ocorex. Free and open source under the GNU GPL v3.')}</span>
               <p>
-                {t('Uma LLM is made by Ocorex. Its skill pack is by Genesys Labs, which licenses it to Uma for free. Your prompts, files, conversations and models stay on this PC. Uma goes online to download the models and the llama.cpp engine, to keep the engine up to date, to check that your PCs reach the internet, and for web tools you turn on.')}
+                {t('Uma LLM is made by Ocorex. Its skill pack is by Genesys Labs, which licenses it to Uma for free. Your prompts, files, conversations and models stay on this PC. Uma goes online to download the models and the llama.cpp engine, to keep the engine up to date, to check that your PCs reach the internet, and for web tools you turn on.')}{' '}{t('It also looks for a newer Uma once a day, unless you turn that off in Settings → Updates.')}
               </p>
               <div className="about-links">
                 <button type="button" onClick={() => api.openExternal('https://www.0corexpsx.com/uma')}>

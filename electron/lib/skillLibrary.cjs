@@ -46,7 +46,9 @@ class SkillLibrary {
   async search({ query = '', risk = '', offset = 0, limit = 40 } = {}, installed = new Set()) {
     const { skills } = await this.index();
     const wantedRisk = RISK_LEVELS.includes(risk) ? risk : '';
-    const pool = wantedRisk ? skills.filter((skill) => (skill.risk || 'unknown') === wantedRisk) : skills;
+    // 'connector' as a filter lists the skills that need one, which Uma cannot use.
+    const pool = risk === 'connector' ? skills.filter((skill) => skill.connector)
+      : wantedRisk ? skills.filter((skill) => (skill.risk || 'unknown') === wantedRisk) : skills;
     const text = String(query || '').trim();
     let matches = pool;
     if (text) {
@@ -64,6 +66,8 @@ class SkillLibrary {
     return {
       total: matches.length,
       librarySize: skills.length,
+      // How many of them the model can really use: the others need a connector Uma does not have.
+      usableSize: skills.filter((skill) => !skill.connector).length,
       items: matches.slice(start, start + size).map((skill) => ({
         name: skill.name,
         description: skill.description,
@@ -74,6 +78,7 @@ class SkillLibrary {
         files: (skill.files || []).length,
         bytes: skill.bytes || 0,
         installed: installed.has(skill.name),
+        connector: skill.connector || '',
       })),
     };
   }
