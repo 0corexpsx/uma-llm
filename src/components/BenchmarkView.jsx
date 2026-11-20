@@ -66,7 +66,7 @@ function LiveBench({ progress, onCancel }) {
   );
 }
 
-function ResultPanel({ result, onRun }) {
+function ResultPanel({ result, onRun, onOptimize }) {
   const speed = result.speed || {};
   const memory = result.memory || {};
   const device = result.device || {};
@@ -128,16 +128,32 @@ function ResultPanel({ result, onRun }) {
         </div>
       </div>
 
+      {result.optimization && (
+        <div className="bench-detail-card bench-optimization">
+          <SectionLabel>{t('Optimization')}</SectionLabel>
+          <p>{result.optimization.changed
+            ? t('Fastest: {0}. It is saved in this model’s settings.', [result.optimization.chosen])
+            : t('The settings this model already had were the fastest, so nothing was changed.')}</p>
+          {result.optimization.tried.map((entry, index) => (
+            <div className={`bench-kv ${entry.chosen ? 'is-chosen' : ''}`} key={index}>
+              <span>{entry.chosen && <Check size={12} />}{entry.chosen && ' '}{entry.label}</span>
+              <strong>{entry.failed || !entry.tokensPerSecond ? t('did not load') : `${number(entry.tokensPerSecond)} ${t('tok/s')}`}</strong>
+            </div>
+          ))}
+        </div>
+      )}
+
       <div className="bench-result-foot">
         <span><Check size={13} />{' '}{t('Measured locally · no cloud round trip')}</span>
+        <Button size="sm" variant="ghost" icon={Zap} onClick={onOptimize}>{t('Optimize and benchmark')}</Button>
         <Button size="sm" variant="secondary" icon={RefreshCw} onClick={onRun}>{t('Run it again')}</Button>
       </div>
     </section>
   );
 }
 
-export default function BenchmarkView({ boot, progress, history = [], onRun, onCancel, onClear, onOpenModels, onOpenSettings }) {
-  const running = progress && ['starting', 'loading', 'warming', 'probing', 'measuring'].includes(progress.phase);
+export default function BenchmarkView({ boot, progress, history = [], onRun, onOptimize, onCancel, onClear, onOpenModels, onOpenSettings }) {
+  const running = progress && ['starting', 'optimizing', 'loading', 'warming', 'probing', 'measuring'].includes(progress.phase);
   const result = progress?.result || (progress?.phase === 'done' ? null : (running ? null : history[0]));
   const latest = history[0];
   const canRun = Boolean(boot.activeModel && boot.runtime.installed) && !running;
@@ -161,7 +177,10 @@ export default function BenchmarkView({ boot, progress, history = [], onRun, onC
           {running ? (
             <Button size="sm" variant="secondary" icon={CircleStop} onClick={onCancel}>{t('Cancel')}</Button>
           ) : (
-            <Button size="sm" variant="primary" icon={Play} onClick={onRun} disabled={!canRun}>{t('Run benchmark')}</Button>
+            <>
+              <Button size="sm" variant="secondary" icon={Zap} onClick={onOptimize} disabled={!canRun}>{t('Optimize and benchmark')}</Button>
+              <Button size="sm" variant="primary" icon={Play} onClick={onRun} disabled={!canRun}>{t('Run benchmark')}</Button>
+            </>
           )}
         </div>
       </header>
@@ -178,6 +197,18 @@ export default function BenchmarkView({ boot, progress, history = [], onRun, onC
               <Button variant="primary" size="lg" icon={running ? CircleStop : Play} onClick={running ? onCancel : onRun} disabled={!running && !canRun}>
                 {running ? t('Cancel benchmark') : t('Run benchmark')}
               </Button>
+              {!running && (
+                <Button
+                  variant="secondary"
+                  size="lg"
+                  icon={Zap}
+                  onClick={onOptimize}
+                  disabled={!canRun}
+                  title={t('Loads the model several times with different settings (graphics cards used, how they share the model, GPU layers, CPU threads), keeps the fastest in the model’s settings, then runs the benchmark. It takes a few minutes with a large model.')}
+                >
+                  {t('Optimize and benchmark')}
+                </Button>
+              )}
               <span className="bench-hero-hint">{boot.activeModel ? t('{0} · {1}k context', [modelLabel, (boot.settings.contextSize / 1024).toFixed(0)]) : t('Choose a model first')}</span>
             </div>
           </div>
@@ -207,7 +238,7 @@ export default function BenchmarkView({ boot, progress, history = [], onRun, onC
         ) : progress?.phase === 'cancelled' ? (
           <div className="bench-cancelled"><CircleStop size={15} />{' '}{t('Benchmark cancelled. The model remains loaded.')}</div>
         ) : result ? (
-          <ResultPanel result={result} onRun={onRun} />
+          <ResultPanel result={result} onRun={onRun} onOptimize={onOptimize} />
         ) : (
           <section className="bench-empty-state">
             <span className="bench-empty-icon"><BarChart3 size={25} strokeWidth={1.4} /></span>

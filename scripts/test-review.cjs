@@ -2245,6 +2245,20 @@ async function testRealModelFixes() {
   run = await chat([toolCall('run_command', { command: 'node -e "console.log(\'all tests passed\')"' }), 'The test passes: it printed "all tests passed".'], 'run the test of calc.js');
   assert.equal(run.calls.length, 2, 'a true "it passes" is taken');
   assert.match(run.message.content, /The test passes/);
+
+  // After a failed build the whole file comes back much shorter: a real model got rid of its
+  // compiler errors by leaving out the program's tabs (411 lines, then 274, then 181). Refused once.
+  const longFile = Array.from({ length: 90 }, (_, index) => `int value${index} = ${index};`).join('\n');
+  const shortFile = Array.from({ length: 30 }, (_, index) => `int value${index} = ${index};`).join('\n');
+  run = await chat([
+    toolCall('write_file', { path: 'shrink.cpp', content: longFile }),
+    toolCall('run_command', { command: 'node -e "console.error(\'shrink.cpp(12): error C2065\'); process.exit(1)"' }),
+    toolCall('write_file', { path: 'shrink.cpp', content: shortFile }),
+    'The build still fails with error C2065 in shrink.cpp, line 12.',
+  ], 'create shrink.cpp and compile it');
+  assert.deepEqual(toolBlocks(run.message).map((block) => block.status), ['done', 'error', 'error']);
+  assert.match(run.calls[3].messages.at(-1).content, /shrink\.cpp has 90 lines and this would replace it with 30, leaving out parts of what the user asked for[\s\S]*replace_in_file/);
+  assert.equal((await fsp.readFile(path.join(workspace.root, 'shrink.cpp'), 'utf8')).split('\n').length, 90, 'the file keeps what it had');
   await store.updateSettings({ allowShell: false, askBeforeCommands: true });
 
   // With full PC access, a file goes where the user wrote, not one folder off: a real model left a
@@ -2424,8 +2438,123 @@ async function testSeveralGraphicsCards() {
   await assert.rejects(run.manager.startWithHelpers(model, runtimeConfig, 'key'), /stopped while loading/);
   assert.equal(asked, 0);
   assert.equal(after(run.starts()[0], '-ngl'), 'all');
-  assert.deepEqual(run.manager.cards, { used: [], missing: [] });
+  assert.deepEqual([run.manager.cards.used, run.manager.cards.missing], [[], []]);
+
+  // Cards chosen for the model (its settings, or "Optimize and benchmark" trying them): one card
+  // alone gets -dev and every layer when the model fits on it; two cards share it between them;
+  // a name the engine does not list, or all the cards, changes nothing.
+  run = make(layers(20, 200), all);
+  run.manager.trialSettings = { gpuCards: 'CUDA0', splitMode: 'tensor' };
+  await assert.rejects(run.manager.startWithHelpers(model, runtimeConfig, 'key'), /stopped while loading/);
+  starts = run.starts();
+  assert.equal(starts.length, 1, 'one card: no plan to fall back from');
+  assert.ok(after(starts[0], '-dev') === 'CUDA0' && after(starts[0], '-ngl') === 'all' && !starts[0].includes(' -ts '), starts[0]);
+  assert.equal(after(starts[0], '--split-mode'), 'tensor');
+  assert.match(run.lines.join('\n'), /only CUDA0 NVIDIA GeForce RTX 3060 is used, as chosen for this model/);
+  assert.deepEqual(run.manager.cards.all.map((device) => device.name), ['CUDA0', 'CUDA1', 'CUDA2']);
+  assert.equal(run.manager.computeInfo().gpuName, 'NVIDIA GeForce RTX 3060');
+  run = make(layers(40, 480), all);
+  run.manager.trialSettings = { gpuCards: 'CUDA1,CUDA2' };
+  await assert.rejects(run.manager.startWithHelpers(model, runtimeConfig, 'key'), /stopped while loading/);
+  assert.ok(after(run.starts()[0], '-dev') === 'CUDA1,CUDA2' && after(run.starts()[0], '-ts') === '50,50' && !run.starts()[0].includes('--split-mode'), run.starts()[0]);
+  run = make(layers(40, 480), all);
+  run.manager.trialSettings = { gpuCards: 'CUDA7' };
+  await assert.rejects(run.manager.startWithHelpers(model, runtimeConfig, 'key'), /stopped while loading/);
+  assert.equal(after(run.starts()[0], '-dev'), 'CUDA0,CUDA1,CUDA2');
+  // Guessing ahead without a second model: on when the engine's own help lists it, the MTP head
+  // only for a model that has one; a load that fails with it is tried again without it.
+  const { speculationArgs, speculationSupport } = require('../electron/lib/modelSettings.cjs');
+  const help = '--spec-type none,draft-simple,draft-eagle3,draft-mtp,draft-dflash,ngram-simple,ngram-mod,ngram-cache\n   comma-separated list of types';
+  assert.deepEqual(speculationSupport(help), { mtp: true, ngram: true });
+  assert.deepEqual(speculationSupport('--spec-type none,draft-simple\n'), { mtp: false, ngram: false });
+  assert.deepEqual(speculationSupport(''), { mtp: false, ngram: false });
+  assert.deepEqual(speculationArgs({ mtp: true, ngram: true }), ['--spec-type', 'draft-mtp,ngram-mod']);
+  assert.deepEqual(speculationArgs({}), []);
+  const guessing = (info, settings = {}) => {
+    const made = make(info, all.slice(0, 1), ['NVIDIA GeForce RTX 3060']);
+    made.manager.engineHelp = async () => help;
+    made.manager.store.getEffectiveSettings = () => ({ contextSize: 8192, ...settings });
+    return made;
+  };
+  run = guessing({ ...layers(20, 200), mtpLayers: 1 });
+  await assert.rejects(run.manager.ensureServer(model), /stopped while loading/);
+  starts = run.starts();
+  assert.equal(starts.length, 2, 'with guessing ahead, then without');
+  assert.equal(after(starts[0], '--spec-type'), 'draft-mtp,ngram-mod');
+  assert.ok(!starts[1].includes('--spec-type'), starts[1]);
+  assert.match(run.lines.join('\n'), /guessing ahead without a second model: the model's own MTP head and text already in the chat/);
+  assert.match(run.lines.join('\n'), /the load failed with guessing ahead[^\n]*loading again without it/);
+  run = guessing(layers(20, 200));
+  await assert.rejects(run.manager.startWithHelpers(model, runtimeConfig, 'key'), /stopped while loading/);
+  assert.equal(after(run.starts()[0], '--spec-type'), 'ngram-mod', 'no MTP head: only repeated text is guessed');
+  run = guessing({ ...layers(20, 200), mtpLayers: 1 }, { mtp: 'off', ngram: 'off' });
+  await assert.rejects(run.manager.startWithHelpers(model, runtimeConfig, 'key'), /stopped while loading/);
+  assert.ok(!run.starts()[0].includes('--spec-type'), 'both turned off in the model settings');
+  run = guessing({ ...layers(20, 200), mtpLayers: 1 }, { extraArgs: '--spec-type ngram-simple' });
+  await assert.rejects(run.manager.startWithHelpers(model, runtimeConfig, 'key'), /stopped while loading/);
+  assert.equal(after(run.starts()[0], '--spec-type'), 'ngram-simple', 'a --spec-type written by hand is left alone');
+  // An engine whose help does not list them (the stand-in engine here is Node itself): nothing is added.
+  run = make({ ...layers(20, 200), mtpLayers: 1 }, all.slice(0, 1), ['NVIDIA GeForce RTX 3060']);
+  await assert.rejects(run.manager.startWithHelpers(model, runtimeConfig, 'key'), /stopped while loading/);
+  assert.ok(!run.starts()[0].includes('--spec-type'));
+
+  // A trial setting of null takes a saved setting away, and nothing of a trial is left afterwards.
+  run = make(layers(40, 480), all);
+  run.manager.store.getEffectiveSettings = () => ({ contextSize: 8192, gpuLayers: 20 });
+  assert.equal(run.manager.settingsFor('big').gpuLayers, 20);
+  run.manager.trialSettings = { gpuLayers: null };
+  assert.equal('gpuLayers' in run.manager.settingsFor('big'), false);
   console.log('several graphics cards (readings, what the engine lists, the split and its fallbacks): OK');
+}
+
+/**
+ * A chat that built a program stays about that program. The user's report (2026-11-19, "Make an
+ * taskmanager in C++ and make the exe"): after the first build, "i want a GUI exe version like
+ * windows 7 taskmanager" was read as plain talk, the tools that write files were taken away, the
+ * model pasted the program into the chat for six replies, and then answered "where is the exe?"
+ * with a folder that did not exist.
+ */
+function testWorkChat() {
+  const { COMMAND_IN_CHAT_RE } = require('../electron/lib/agentChecks.cjs');
+  const work = { priorUsedTools: true };
+  const read = (text, options = work) => { const task = classifyTask(text, options); return [Boolean(task.agentic), Boolean(task.wantsEdit), Boolean(task.asksOnly)].join(); };
+  // What is wanted, said without a verb Uma knows, or with a typo in it.
+  assert.equal(read('i want a GUI exe version like windows 7 taskmanager'), 'true,true,false');
+  assert.equal(read('reamke it to looks like windows xp'), 'true,true,false');
+  assert.equal(read('remake it looking like windows xp'), 'true,true,false');
+  assert.equal(read('there is nothing'), 'true,true,false');
+  // A question about what the work made is answered by looking, and changes nothing.
+  assert.equal(read('where is the exe?'), 'true,false,true');
+  // "continue" resumes that request as it was read: work on the files, and a change.
+  const resumed = classifyTask('continue', { priorTask: 'i want a GUI exe version like windows 7 taskmanager', priorUsedTools: true });
+  assert.deepEqual([resumed.isContinue, resumed.agentic, resumed.wantsEdit, resumed.workChat], [true, true, true, true]);
+  // The same words in a chat that never touched a file stay plain talk.
+  const none = { priorUsedTools: false };
+  assert.equal(read('i want a pizza recipe like the one from Naples', none), 'false,false,false');
+  assert.equal(read('there is nothing', none), 'false,false,false');
+  assert.equal(read('thanks, that works'), 'false,false,false');
+  assert.equal(read('tell me a joke'), 'false,false,false');
+  // A command written into the chat where it was meant to be run.
+  assert.match('The build output folder doesn\'t exist yet. Let me rebuild the project to generate the executable.\n\n```powershell\ncd "C:\\Users\\me\\Documents\\Uma LLM"\n& "C:\\Program Files\\MSBuild.exe" TaskManager.vcxproj /p:Configuration=Release\n```', COMMAND_IN_CHAT_RE);
+  assert.match('Let me check the current state of the workspace and rebuild.\n\n```powershell\nGet-ChildItem -Recurse | Select-Object FullName\n```', COMMAND_IN_CHAT_RE);
+  assert.doesNotMatch('To build it yourself, run this in the project folder:\n\n```powershell\nmsbuild TaskManager.vcxproj\n```', COMMAND_IN_CHAT_RE);
+  assert.doesNotMatch('Let me explain how the loop works.\n\n```cpp\nfor (int i = 0; i < n; i += 1) { total += values[i]; }\n```', COMMAND_IN_CHAT_RE);
+  // Microsoft's compiler called the three ways that fail in PowerShell (the user's second chat,
+  // 2026-11-20): each is recognised, so Uma can run it inside Visual Studio's environment.
+  const { compilerCall } = require('../electron/lib/tools.cjs');
+  assert.equal(compilerCall('cl taskmgr.cpp /link /subsystem:windows /out:taskmgr.exe'), 'cl taskmgr.cpp /link /subsystem:windows /out:taskmgr.exe');
+  assert.equal(compilerCall('& "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\VC\\Tools\\MSVC\\14.44.35207\\bin\\Hostx64\\x64\\cl.exe" taskmgr.cpp /link /out:a.exe'), 'cl taskmgr.cpp /link /out:a.exe');
+  assert.equal(compilerCall('& "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat" && cl taskmgr.cpp /Fe:a.exe'), 'cl taskmgr.cpp /Fe:a.exe');
+  assert.equal(compilerCall('& "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\MSBuild\\Current\\Bin\\MSBuild.exe" a.vcxproj'), '');
+  assert.equal(compilerCall('clang main.c'), '');
+  assert.equal(compilerCall('Get-ChildItem cl.exe'), '');
+  // What a window shows, quoted, after only the small picture: a real model read "65031 MB" off a 40 GB PC.
+  const { QUOTES_SCREEN_RE } = require('../electron/lib/agentChecks.cjs');
+  assert.match('The XP-style Task Manager is built and running. You can see it in the top-left of the screen — it shows a list of processes, plus a memory bar at the bottom showing "28471 MB / 65031 MB (27%)".', QUOTES_SCREEN_RE);
+  assert.match('The title bar reads “Task Manager”.', QUOTES_SCREEN_RE);
+  assert.doesNotMatch('The program is built. Start xpTaskMgr.exe from the folder to see it.', QUOTES_SCREEN_RE);
+  assert.doesNotMatch('You can see the full code in taskmgr.cpp.', QUOTES_SCREEN_RE);
+  console.log('a chat that built a program stays about it (wants, typos, questions, continue, commands pasted in chat, compiler calls, quoted screens): OK');
 }
 
 async function testOtherLanguages() {
@@ -2619,6 +2748,7 @@ async function main() {
   await testDocuments();
   await testSeeing();
   await testSeveralGraphicsCards();
+  testWorkChat();
   testPromptSize();
   testMainRamFirst();
   await testSpeedReadings();

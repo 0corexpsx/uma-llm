@@ -219,6 +219,9 @@ async function readModelInfo(parts) {
       return interval > 0 ? Math.ceil(nLayer / interval) : nLayer;
     })(),
     hasStateMemory: Number(field('ssm.state_size')) > 0,
+    // A head of its own that predicts the tokens after the next one ("MTP" models): llama.cpp can
+    // use it to guess ahead without a second model (--spec-type draft-mtp).
+    mtpLayers: Number(field('nextn_predict_layers')) || 0,
     // Sparse attention (an indexer picks the cache rows each token attends to): DeepSeek V3.2, GLM-5, qwen4exp.
     indexerHeads: Number(field('attention.indexer.head_count')) || 0,
     // What decides whether another model can draft for this one (see modelSettings.draftCompatibility).

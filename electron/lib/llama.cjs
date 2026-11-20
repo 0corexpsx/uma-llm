@@ -6,7 +6,7 @@ const crypto = require('node:crypto');
 const os = require('node:os');
 const { spawn } = require('node:child_process');
 const { sleep } = require('./util.cjs');
-const { DEFAULTS, buildServerArgs, cacheTypeFixes, draftCompatibility, draftArgs, moeCacheShare } = require('./modelSettings.cjs');
+const { DEFAULTS, buildServerArgs, cacheTypeFixes, draftCompatibility, draftArgs, moeCacheShare, speculationArgs, speculationSupport, parseExtraArgs } = require('./modelSettings.cjs');
 
 // The first llama.cpp build with the MoE cache (--moe-cache-mib, --moe-cache-cpu-share).
 const MOE_CACHE_BUILD = 12191;
@@ -51,12 +51,28 @@ function listEngineDevices(serverPath) {
   });
 }
 
+/** The engine's own --help text: which ways of guessing ahead this build knows. */
+function engineHelpText(serverPath) {
+  return new Promise((resolve) => {
+    require('node:child_process').execFile(serverPath, ['--help'], {
+      cwd: path.dirname(serverPath), windowsHide: true, timeout: 30000, maxBuffer: 8 * 1024 * 1024,
+    }, (error, stdout, stderr) => resolve(`${stdout}\n${stderr}`));
+  });
+}
+
 class LlamaManager {
-  constructor({ store, runtime, emit, logsDir, modelInfo, getModel = null, freeVram = freeVramBytes, freeRam = () => os.freemem(), network = null, chatMemory = null, batchTuner = null, listDevices = listEngineDevices }) {
+  constructor({ store, runtime, emit, logsDir, modelInfo, getModel = null, freeVram = freeVramBytes, freeRam = () => os.freemem(), network = null, chatMemory = null, batchTuner = null, listDevices = listEngineDevices, engineHelp = engineHelpText }) {
     this.store = store;
+    // Guessing ahead without a second model (see modelSettings.speculationArgs): what each engine
+    // build knows, asked once, and what the current load uses.
+    this.engineHelp = engineHelp;
+    this.specSupport = new Map();
+    this.speculation = null;
     // This PC's graphics cards for the current load, when it has several (see localGpus).
     this.listDevices = listDevices;
     this.cards = { used: [], missing: [] };
+    // Settings being tried by "Optimize and benchmark", on top of the model's own (null removes one).
+    this.trialSettings = null;
     // Picks the physical batch size from measured reading speeds (null: the setting is used as it is).
     this.batchTuner = batchTuner;
     this.batchTune = null;
@@ -121,6 +137,8 @@ class LlamaManager {
       // The small model guessing ahead for this one, and where it runs.
       draft: this.child && this.draft ? { name: this.draft.name, device: this.draftDeviceLabel() } : null,
       moeCache: this.child && this.moeCache ? { ...this.moeCache } : null,
+      // Guessing ahead without a second model: the model's own MTP head, text already in the chat.
+      speculation: this.child && this.speculation ? { ...this.speculation } : null,
       batch: this.child && this.batchTune ? { size: this.batchTune.size, exploring: this.batchTune.exploring } : null,
       logs: this.logs.slice(-12),
     };
@@ -206,6 +224,24 @@ class LlamaManager {
     }
   }
 
+  /** A model's settings, with the ones "Optimize and benchmark" is trying on top of them. */
+  settingsFor(modelId) {
+    const settings = { ...this.store.getEffectiveSettings(modelId) };
+    for (const [key, value] of Object.entries(this.trialSettings || {})) {
+      if (value === null || value === undefined) delete settings[key];
+      else settings[key] = value;
+    }
+    return settings;
+  }
+
+  /** This PC's graphics cards as the installed engine names them, for the settings screen ([] with fewer than two). */
+  async engineCards(runtimeConfig) {
+    const names = (this.runtime?.hardware?.gpus || []).map((card) => card.name);
+    if (names.length < 2 || !runtimeConfig?.serverPath || runtimeConfig.backend === 'cpu') return [];
+    const output = await this.listDevices(runtimeConfig.serverPath).catch(() => '');
+    return localCards(parseDeviceList(output), names).used.map((device) => ({ name: device.name, card: device.card, totalMB: device.totalMB, freeMB: device.freeMB }));
+  }
+
   async ensureServer(model) {
     const runtimeConfig = this.store.getRuntime();
     if (!runtimeConfig.serverPath || !(await fsp.stat(runtimeConfig.serverPath).catch(() => null))) {
@@ -216,8 +252,10 @@ class LlamaManager {
     }
     const launchKey = JSON.stringify([
       runtimeConfig.serverPath,
-      buildServerArgs(model.path, this.store.getEffectiveSettings(model.id), runtimeConfig.backend, { mmproj: model.mmproj?.path }),
+      buildServerArgs(model.path, this.settingsFor(model.id), runtimeConfig.backend, { mmproj: model.mmproj?.path }),
       this.network?.launchKey() || '',
+      this.settingsFor(model.id).gpuCards || '',
+      `${this.settingsFor(model.id).mtp || ''}/${this.settingsFor(model.id).ngram || ''}`,
     ]);
     if (this.child && this.modelId === model.id && this.state === 'ready' && this.launchKey === launchKey) {
       this.touch();
@@ -230,8 +268,8 @@ class LlamaManager {
     // A draft model that made the load fail is left out until the settings change (see draftFor).
     if (this.draftFailedKey && this.draftFailedKey !== launchKey) this.draftFailedKey = '';
     if (this.moeFailedKey && this.moeFailedKey !== launchKey) this.moeFailedKey = '';
-    this.starting = this.startWithHelpers(model, runtimeConfig, launchKey)
-      .catch((err) => {
+    if (this.specFailedKey && this.specFailedKey !== launchKey) this.specFailedKey = '';
+    const remedy = (err) => {
         if (err.code === 'SERVER_FAILED' && this.batchTune && this.batchTune.size > 512) {
           // A larger batch needs more GPU memory: this size is not tried again for this model.
           this.batchTuner.fail(this.batchTune.key, this.batchTune.size);
@@ -248,6 +286,15 @@ class LlamaManager {
         this.log(`[uma] the load failed with the draft model ${this.draft.name}; loading again without it`);
         this.draftFailedKey = launchKey;
         return this.startWithHelpers(model, runtimeConfig, launchKey);
+    };
+    this.starting = this.startWithHelpers(model, runtimeConfig, launchKey)
+      .catch((err) => {
+        if (err.code !== 'SERVER_FAILED' || !this.speculation) return remedy(err);
+        // Guessing ahead must never keep a model from loading: first the same load without it,
+        // then whatever else may be in the way.
+        this.log('[uma] the load failed with guessing ahead (MTP head, n-gram) on; loading again without it');
+        this.specFailedKey = launchKey;
+        return this.startWithHelpers(model, runtimeConfig, launchKey).catch(remedy);
       })
       .finally(() => {
         this.starting = null;
@@ -443,7 +490,7 @@ class LlamaManager {
     this.broadcast();
 
     await this.rotateLog();
-    let chosen = this.store.getEffectiveSettings(model.id);
+    let chosen = this.settingsFor(model.id);
     // The physical batch size: measured and picked by Uma, unless it was set by hand for this model.
     this.batchTune = null;
     const batchByHand = this.store.getSettings?.()?.modelOverrides?.[model.id]?.ubatchSize !== undefined;
@@ -462,8 +509,19 @@ class LlamaManager {
     this.draft = launchKey && this.draftFailedKey === launchKey ? null : await this.draftFor(model, settings, info);
     const draftBytes = this.draft ? this.draft.memoryMB * 1024 * 1024 : 0;
     // Several graphics cards in this PC: what the engine lists of them is what counts (see localGpus).
-    this.cards = await this.localGpus(runtimeConfig, settings);
+    const found = await this.localGpus(runtimeConfig, settings);
+    // Cards chosen for this model in its settings (or by "Optimize and benchmark"): a model that
+    // fits on one card is faster there than shared between several (9B Q8: 35 tok/s on an RTX 3060
+    // alone, 22 shared with two Tesla P40). Names the engine no longer lists are ignored.
+    const wanted = String(settings.gpuCards || '').split(',').map((name) => name.trim()).filter(Boolean);
+    const picked = found.used.filter((device) => wanted.includes(device.name));
+    this.cards = picked.length && picked.length < found.used.length
+      ? { used: picked, missing: found.missing, all: found.used, chosen: true }
+      : { ...found, all: found.used };
+    if (this.cards.chosen) this.log(`[uma] only ${picked.map((device) => `${device.name} ${device.card}`).join(', ')} ${picked.length > 1 ? 'are' : 'is'} used, as chosen for this model`);
     const several = this.cards.used.length > 1;
+    // What the whole model needs on GPUs, for "Optimize and benchmark" (0 when it cannot be worked out).
+    this.needMB = info ? Math.ceil(estimateMemory(info, { ...DEFAULTS, ...settings, gpuLayers: 999 }).gpuBytes / MiB) || 0 : 0;
     if (this.cards.used.length) this.compute.gpuName = gpuSummary(this.cards.used.map((device) => device.card)).slice(0, 100);
     const draftMB = this.draft?.memoryMB || 0;
     // What the whole model needs on GPUs, or 0 when that cannot be worked out (the cards are then filled).
@@ -507,6 +565,23 @@ class LlamaManager {
       : null;
     for (const note of fixes.notes) this.log(`[uma] ${note}`);
     this.cacheFix = fixes.changed;
+    // Guessing ahead without a second model, when the engine knows how. A draft model chosen by
+    // the user comes first, and so does a --spec-type written in the extra arguments. The MTP head
+    // is left out with helper PCs: untested over the network.
+    this.speculation = null;
+    const specByHand = parseExtraArgs(settings.extraArgs).some((arg) => arg.split('=')[0] === '--spec-type');
+    if (!this.draft && !specByHand && launchKey !== this.specFailedKey && (settings.mtp !== 'off' || settings.ngram !== 'off')) {
+      if (!this.specSupport.has(runtimeConfig.serverPath)) {
+        this.specSupport.set(runtimeConfig.serverPath, speculationSupport(await this.engineHelp(runtimeConfig.serverPath).catch(() => '')));
+      }
+      const support = this.specSupport.get(runtimeConfig.serverPath);
+      const mtp = settings.mtp !== 'off' && support.mtp && info?.mtpLayers > 0 && !this.helpers.servers.length;
+      const ngram = settings.ngram !== 'off' && support.ngram;
+      if (mtp || ngram) {
+        this.speculation = { mtp, ngram };
+        this.log(`[uma] guessing ahead without a second model: ${[mtp ? "the model's own MTP head" : '', ngram ? 'text already in the chat (n-gram)' : ''].filter(Boolean).join(' and ')}`);
+      }
+    }
     // The engine's build number, from the folder Uma installed it in (llama-b12318-cuda): 0 when unknown.
     this.engineBuild = Number(/llama-b(\d+)/i.exec(String(runtimeConfig.serverPath || ''))?.[1]) || 0;
     const args = [
@@ -514,7 +589,9 @@ class LlamaManager {
       // --rpc has registered them.
       ...(this.helpers.servers.length ? ['--rpc', this.helpers.servers.join(',')] : []),
       ...buildServerArgs(model.path, settings, runtimeConfig.backend, { allLayers, mmproj: model.mmproj?.path, placement: placementArgs(this.placement), extraFitMB: this.draft?.memoryMB || 0, moeCache: this.moeCache }),
-      ...(this.draft ? draftArgs({ path: this.draft.path, tokens: this.draft.tokens, device: this.placement?.draftDevice || '' }) : []),
+      ...(this.draft ? draftArgs({ path: this.draft.path, tokens: this.draft.tokens, device: this.placement?.draftDevice || '' }) : speculationArgs(this.speculation || {})),
+      // One card chosen of several: without -dev the engine would use every card it lists.
+      ...(this.cards.chosen && !several && !this.helpers.servers.length ? ['-dev', this.cards.used[0].name] : []),
       '--host', '127.0.0.1',
       '--port', String(port),
       '--api-key', this.apiKey,

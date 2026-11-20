@@ -6784,7 +6784,34 @@ a {
   padding-top: 11px;
 }
 
+/* After "Optimize and benchmark": every setting tried, with its speed. */
+.bench-optimization {
+  margin-top: 7px;
+}
+
+.bench-optimization p {
+  margin: 0 0 7px;
+  color: var(--text-soft);
+  font-size: 9.5px;
+}
+
+.bench-optimization .bench-kv span {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.bench-optimization .bench-kv.is-chosen span,
+.bench-optimization .bench-kv.is-chosen strong {
+  color: var(--text);
+}
+
+.bench-optimization .bench-kv.is-chosen svg {
+  color: var(--sage);
+}
+
 .bench-result-foot > span {
+  margin-right: auto;
   display: flex;
   align-items: center;
   gap: 4px;

@@ -121,6 +121,8 @@ async function detectVisualStudio() {
     devenv ? `devenv.exe: ${devenv}` : '',
     cppTools ? 'C++ tools installed' : 'C++ tools NOT installed (add the "Desktop development with C++" workload in Visual Studio Installer)',
     msbuild ? `MSBuild: ${msbuild}` : '',
+    // The shortest way to an .exe, said here so it is not found by trial and error.
+    cppTools ? 'to compile C or C++ files without a project file, call run_command with a plain cl command, which Uma runs inside the Visual Studio environment, for example: cl /nologo /EHsc /O2 main.cpp /Fe:app.exe /link /SUBSYSTEM:WINDOWS user32.lib gdi32.lib comctl32.lib (leave /SUBSYSTEM:WINDOWS out for a console program; MSBuild needs a .vcxproj and cannot build a .cpp by itself). Give the .exe a name of its own: one named like a Windows program (taskmgr.exe, notepad.exe) starts that program instead' : '',
   ].filter(Boolean);
   return { name: 'visual studio', ok: true, value: details.join('; ') };
 }
@@ -214,6 +216,36 @@ function fixProgramCalls(command) {
   }
   if (/^"[^"]+\.(?:exe|bat|cmd|ps1)"/i.test(text)) text = `& ${text}`;
   return text;
+}
+
+/**
+ * The compiler part of a command that calls Microsoft's C++ compiler, or '' for any other command.
+ * cl.exe only works inside Visual Studio's own environment (include and library paths), which a
+ * PowerShell terminal does not have, so a model that tries it goes through these one after the
+ * other, each failing (seen 2026-11-20, five failed commands before the first build):
+ *   cl main.cpp /link ...                                      -> "cl is not recognized"
+ *   & "C:\...\MSVC\14.44.35207\bin\Hostx64\x64\cl.exe" ...    -> a guessed version, or "no include path set"
+ *   & "C:\...\vcvars64.bat" && cl main.cpp ...                 -> the .bat sets cmd's variables, not PowerShell's
+ * Uma runs the compiler part inside that environment itself (see run_command).
+ */
+function compilerCall(command) {
+  const text = String(command || '').trim();
+  const afterVcvars = text.match(/vcvars(?:64|32|all)\.bat"?(?:\s+\w+)?\s*(?:&&|;)\s*(cl(?:\.exe)?\s+[\s\S]+)$/i);
+  if (afterVcvars) return afterVcvars[1].replace(/^cl\.exe/i, 'cl');
+  const bare = text.match(/^cl(?:\.exe)?\s+([\s\S]+)$/i);
+  if (bare) return `cl ${bare[1]}`;
+  const byPath = text.match(/^(?:&\s*)?"[^"]*\\cl\.exe"\s+([\s\S]+)$/i) || text.match(/^(?:&\s*)?[A-Za-z]:\\\S*\\cl\.exe\s+([\s\S]+)$/i);
+  return byPath ? `cl ${byPath[1]}` : '';
+}
+
+let vcvarsPath = null;
+/** The script that sets up Visual Studio's 64-bit C++ environment, or '' without the C++ tools. */
+async function findVcvars() {
+  if (vcvarsPath !== null) return vcvarsPath;
+  const programFiles = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
+  const vswhere = path.join(programFiles, 'Microsoft Visual Studio', 'Installer', 'vswhere.exe');
+  vcvarsPath = (await execOutput(vswhere, ['-latest', '-products', '*', '-find', 'VC\\Auxiliary\\Build\\vcvars64.bat'])).split(/\r?\n/)[0] || '';
+  return vcvarsPath;
 }
 
 let msbuildPath = null;
@@ -937,9 +969,23 @@ class ToolRunner {
             const found = await findMsbuild();
             if (found) toRun = command.replace(/^msbuild(?:\.exe)?/i, `& "${found}"`);
           }
-          const result = await runCommand(toRun, cwd, args.timeout_seconds, signal);
+          // Microsoft's compiler called directly: run inside Visual Studio's environment (see compilerCall).
+          let compileScript = '';
+          const compiler = process.platform === 'win32' ? compilerCall(command) : '';
+          const vcvars = compiler ? await findVcvars() : '';
+          if (vcvars) {
+            compileScript = path.join(require('node:os').tmpdir(), `uma-cl-${process.pid}-${Date.now()}.cmd`);
+            await fsp.writeFile(compileScript, `@echo off\r\ncall "${vcvars}" >nul 2>&1\r\n${compiler.replace(/%/g, '%%')}\r\nexit /b %errorlevel%\r\n`);
+            toRun = `& "${compileScript}"`;
+          }
+          const result = await runCommand(toRun, cwd, args.timeout_seconds, signal).finally(() => (compileScript ? fsp.rm(compileScript, { force: true }).catch(() => {}) : null));
           let output = result.output.trim() || '(no output)';
           if (corrected) output = `[Uma corrected the command to: ${corrected}]\n${output}`;
+          if (compileScript) output = `[Uma ran the compiler inside Visual Studio's C++ environment: ${compiler}]\n${output}`;
+          // Windows functions the linker cannot find: their libraries were not named.
+          if (compileScript && result.code !== 0 && /LNK2019|LNK2001/.test(output) && /__imp_/.test(output)) {
+            output += '\n\n[The linker did not find Windows functions the program calls: name their libraries at the end of the command, after /link, for example: /link /SUBSYSTEM:WINDOWS user32.lib gdi32.lib comctl32.lib advapi32.lib shell32.lib psapi.lib]';
+          }
           // MSBuild, make, ninja and cmake say so when there was nothing to do.
           if (result.code === 0 && /All outputs are up-to-date|Nothing to be done for|ninja: no work to do|is up to date\.$/im.test(output) && !/^\s*(?:\S+\.(?:cpp|c|cc|cxx|cs|rs)\b|Compiling\b)/m.test(output)) {
             output += '\n\n[Nothing was compiled: every output was already up to date, so no source file has changed since the last build. If you meant to change the code, the edit was not made: make it with replace_in_file first, then build.]';
@@ -1001,4 +1047,4 @@ class ToolRunner {
   }
 }
 
-module.exports = { ToolRunner, TOOL_DOCS, toolDocs, translateChains, adaptForPowerShell, fixProgramCalls, replaceInLegacyText };
+module.exports = { ToolRunner, TOOL_DOCS, toolDocs, translateChains, adaptForPowerShell, fixProgramCalls, replaceInLegacyText, compilerCall };

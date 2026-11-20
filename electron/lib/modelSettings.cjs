@@ -29,11 +29,18 @@ const FIELDS = {
   loadMode: { type: 'enum', values: ['auto', 'none', 'mmap', 'mlock', 'mmap+mlock'] },
   moeCache: { type: 'enum', values: ['auto', 'off'] },
   batchTuning: { type: 'enum', values: ['auto', 'off'] },
+  // How llama.cpp shares a model between several graphics cards (--split-mode).
+  splitMode: { type: 'enum', values: ['auto', 'layer', 'tensor', 'row'] },
+  // The graphics cards this model may use, as the engine names them ("CUDA0" or "CUDA1,CUDA2"); empty: all.
+  gpuCards: { type: 'text', max: 200 },
   extraArgs: { type: 'string', max: 2000 },
   reasoningBudgetMessage: { type: 'text', max: 2000 },
   // A small model of the same family that guesses the next words for this one (speculative decoding).
   draftModelId: { type: 'text', max: 400 },
   draftTokens: { type: 'int', min: 1, max: 16 },
+  // Guessing ahead without a second model: the model's own MTP head, and text already in the chat.
+  mtp: { type: 'enum', values: ['auto', 'off'] },
+  ngram: { type: 'enum', values: ['auto', 'off'] },
 };
 
 /** What Uma uses when a model has no override of its own. GPU layers are automatic unless set. */
@@ -61,10 +68,15 @@ const DEFAULTS = {
   moeCache: 'auto',
   // Uma picks the physical batch size from measured reading speeds (batchTuner.cjs).
   batchTuning: 'auto',
+  // auto leaves llama.cpp's own default (layer): the cards work one after the other.
+  splitMode: 'auto',
+  gpuCards: '',
   extraArgs: '',
   reasoningBudgetMessage: '',
   draftModelId: '',
   draftTokens: 6,
+  mtp: 'auto',
+  ngram: 'auto',
 };
 
 /** Flags Uma must control itself: where it listens, its key, and which files it opens. */
@@ -145,6 +157,7 @@ function buildServerArgs(modelPath, settings, backend, { allLayers = false, mmpr
   if (s.threadsBatch) args.push('-tb', String(s.threadsBatch));
   if (s.kvUnified) args.push('--kv-unified');
   if (s.loadMode !== 'auto') args.push('--load-mode', s.loadMode);
+  if (s.splitMode !== 'auto' && offload) args.push('--split-mode', s.splitMode);
   if (s.reasoningBudget >= 0) args.push('--reasoning-budget', String(s.reasoningBudget));
   if (s.reasoningBudgetMessage) args.push('--reasoning-budget-message', s.reasoningBudgetMessage);
   args.push(...parseExtraArgs(s.extraArgs));
@@ -221,6 +234,26 @@ function draftArgs({ path: draftPath, tokens = DEFAULTS.draftTokens, device = ''
   ];
 }
 
+/**
+ * llama-server arguments for guessing ahead without a second model. The big model checks every
+ * guess, so the text is the same as without; only the speed changes.
+ * - `mtp`: the model's own multi-token-prediction head. Measured with b12428 on two Tesla P40
+ *   (Qwen3.8 27B Q8, tensor split): 12.6 -> 25.5 tok/s on new prose, 138 of 180 guesses kept.
+ * - `ngram`: text already in the chat is guessed when the model starts to repeat it (a file written
+ *   again with a small change): 12.6 -> 86.6 tok/s there, and 108.5 with the MTP head as well;
+ *   nothing changes for new text.
+ */
+function speculationArgs({ mtp = false, ngram = false } = {}) {
+  const types = [...(mtp ? ['draft-mtp'] : []), ...(ngram ? ['ngram-mod'] : [])];
+  return types.length ? ['--spec-type', types.join(',')] : [];
+}
+
+/** Which of those the installed engine knows, from its own --help text. */
+function speculationSupport(helpText) {
+  const types = String(helpText || '').match(/--spec-type\s+([\w,-]+)/)?.[1].split(',') || [];
+  return { mtp: types.includes('draft-mtp'), ngram: types.includes('ngram-mod') };
+}
+
 // Draft models known to work for a tokenizer, offered when none is installed. Checked against
 // llama.cpp b12102: Qwen3.5-0.8B shares the Qwen3.5/3.8 vocabulary (248,320 tokens) and writes sense.
 const SUGGESTED_DRAFTS = {
@@ -239,5 +272,5 @@ function moeCacheShare(loadMode = 'auto') {
 
 module.exports = { moeCacheShare,
   FIELDS, DEFAULTS, CACHE_TYPES, sanitizeModelSettings, buildServerArgs, parseExtraArgs, defaultThreads, cacheTypeFixes,
-  draftCompatibility, draftArgs, SUGGESTED_DRAFTS,
+  draftCompatibility, draftArgs, SUGGESTED_DRAFTS, speculationArgs, speculationSupport,
 };

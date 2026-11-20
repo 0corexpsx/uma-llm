@@ -18,7 +18,7 @@ const {
   SCREEN_WORDS_RE, asksToSee, blindAnswer, inventedListing, pastedFile, earlierLinks, githubRepoFor, repoOutline, plainReadme, sameWords,
   CANNOT_INPUT_RE, PRETENDS_INPUT_RE, repeatsItself, loopsInLine, withoutLoops, withoutRepeats, toolsClaimed, says, claims, previousReplyText,
   saysMissing, foldRepeatedAnswers, CLAIMS_DONE_RE, siteSearch, siteSearchNote, emailNote, RECALL_RE, chatRecap, CLAIMS_CHANGE_RE,
-  ANNOUNCES_NEXT_STEP_RE, classifyTask, isReadOnlyCommand, maxOutputTokens, toolTitle, namedFolder,
+  ANNOUNCES_NEXT_STEP_RE, classifyTask, isReadOnlyCommand, maxOutputTokens, toolTitle, namedFolder, COMMAND_IN_CHAT_RE, QUOTES_SCREEN_RE,
   CLAIMS_PASS_RE, ASKS_ACTION_RE,
 } = require('./agentChecks.cjs');
 const {
@@ -255,7 +255,9 @@ class AgentRunner {
     // Work on the user's files earlier in the chat: then "it is still wrong" is about that work. A web
     // search, a browser opened or a look at the screen is not work on files ("wrong, it is the other
     // Genesys Lab" made a model build a website).
-    const priorUsedTools = earlier.slice(-6).some((message) => message.blocks?.some((block) => block.type === 'tool' && FILE_WORK_TOOLS.includes(block.name)));
+    // The last twelve exchanges count: with only three, a chat that built a program stopped being
+    // about it after a few replies that used no tool, and every later request was read as plain talk.
+    const priorUsedTools = earlier.slice(-24).some((message) => message.blocks?.some((block) => block.type === 'tool' && FILE_WORK_TOOLS.includes(block.name)));
     const attachmentNames = (userMessage.attachments || []).map((item) => item.name);
     return classifyTask(request, { priorTask, priorUsedTools, attachmentNames });
   }
@@ -621,6 +623,7 @@ class AgentRunner {
       // Whether the last terminal command worked, and its first lines when it did not.
       let lastCommand = null;
       let buildNudged = false;
+      let commandNudged = false;
       let sameNudged = false;
       let sightNudged = 0;
       // Answers Uma set aside in this reply: the same text coming back is not accepted as the answer.
@@ -641,6 +644,12 @@ class AgentRunner {
       let pendingDocument = null;
       let documentNudged = false;
       const wrongPlaces = new Set();
+      // Files whose rewrite was refused once because most of the file would have been lost.
+      const shrunk = new Set();
+      // Something changed on the screen (a program started, a click, a key) since the last full look:
+      // what the reply says a window shows can then only come from the small picture, or from nowhere.
+      let unreadScreen = false;
+      let thumbNudged = false;
       let lastRun = null;
       const asksAction = says(ASKS_ACTION_RE, request);
       // The request asks for an answer and names no change (REPORT_ONLY_RE): files that are there stay as they are.
@@ -1032,6 +1041,18 @@ class AgentRunner {
               : `You cannot see the screen or the browser in this chat, so do not describe them.${reads || ' Say what you can do instead.'}`, [...looks, ...(toolNames.includes('fetch_url') ? ['fetch_url'] : []), ...INSPECT_TOOLS]);
             continue;
           }
+          // It says what a window shows, word for word, and has not looked at the screen since the
+          // program was started: the small picture that comes back after a wait cannot be read. A real
+          // model wrote that its memory bar showed "28471 MB / 65031 MB" on a PC with 40 GB.
+          if (!userDenied && !thumbNudged && unreadScreen && sawPicture && toolNames.includes('look_at_screen') && (says(CLAIMS_SIGHT_RE, trimmed) || says(QUOTES_SCREEN_RE, trimmed))) {
+            thumbNudged = true;
+            rejected.push(trimmed);
+            accumulated = accumulated.slice(0, Math.max(0, accumulated.length - (trimmed.length + 2)));
+            const unseen = [...assistantMessage.blocks].reverse().find((block) => block.type === 'text' && block.text.trim());
+            if (unseen) unseen.unchecked = 'unseen';
+            nudge(truncate(trimmed, 800), 'You have not looked at the screen since the last program you started or key you pressed: the small picture that came back is too small to read, so you cannot say what a window shows from it. Call look_at_screen with that window\'s title now. Then say only what that picture shows; if the window is not there, or does not look like what the user asked for, say so plainly.', ['look_at_screen']);
+            continue;
+          }
           // It says it cannot click or type, although the user allowed the mouse and keyboard.
           if (!userDenied && !inputNudged && inputTools.length && says(CANNOT_INPUT_RE, trimmed)) {
             inputNudged = true;
@@ -1163,6 +1184,13 @@ class AgentRunner {
                 : 'You have not looked at the real workspace yet, so that reply cannot be trusted. Call a tool now to inspect the relevant files, then continue the task.', inspectTools);
               continue;
             }
+          }
+          // It wrote the command into the chat instead of running it, in a chat that works on files.
+          if ((task.agentic || task.workChat) && !task.asksOnly && !reportOnly && !userDenied && !commandNudged && forcedRounds < 3 && toolNames.includes('run_command') && COMMAND_IN_CHAT_RE.test(trimmed)) {
+            commandNudged = true;
+            forcedRounds += 1;
+            nudge(trimmed, 'You wrote that command in the chat, which runs nothing. Run it now with run_command, read what it prints, and tell the user what happened.', toolNames);
+            continue;
           }
           if (task.agentic && !task.asksOnly && !noTools && !userDenied && forcedRounds < 3 && says(ANNOUNCES_NEXT_STEP_RE, trimmed)) {
             forcedRounds += 1;
@@ -1321,7 +1349,15 @@ class AgentRunner {
           const same = (value) => nodePath.resolve(this.workspace.root, value).replace(/\\/g, '/').toLowerCase();
           const target = same(goesTo);
           const inside = !nodePath.relative(this.workspace.root, nodePath.resolve(this.workspace.root, goesTo)).startsWith('..');
-          const written = (String(request).match(/(?:[A-Za-z]:[\\/]|\\\\|\/(?=[\w.]))[^\s"'`<>|?*]+/g) || []).map((item) => item.replace(/[.,;:!?)\]]+$/, ''));
+          // A path may hold spaces ("C:\Users\me\Documents\UMA LLM Project\notes.txt"), so from each
+          // place a path starts, every stretch up to a later space on that line counts as written.
+          const written = [];
+          for (const match of String(request).matchAll(/(?:[A-Za-z]:[\\/]|\\\\|\/(?=[\w.]))[^"'`<>|?*\r\n]+/g)) {
+            const words = match[0].split(/(?=\s)/);
+            for (let count = 1; count <= Math.min(words.length, 24); count += 1) {
+              written.push(words.slice(0, count).join('').replace(/[.,;:!?)\]]+$/, ''));
+            }
+          }
           const meant = written.find((item) => same(item) !== target && nodePath.basename(same(item)) === nodePath.basename(target));
           if (!inside && meant && !written.some((item) => same(item) === target) && !wrongPlaces.has(target)) {
             wrongPlaces.add(target);
@@ -1329,6 +1365,25 @@ class AgentRunner {
               ok: false,
               summary: t('Not written: not the place that was asked for'),
               output: `Not done: ${goesTo} is not the path the user wrote. They wrote:\n${meant}\nCall ${call.name} again with that path, copied exactly, every folder of it.`,
+              data: {},
+            };
+            cutWrite = null;
+          }
+        }
+        // A build failed, and the whole file comes back much shorter: the model is getting rid of
+        // the errors by leaving out what the user asked for. A task manager with three tabs went
+        // from 411 lines to 274 to 181, and what was left had no tabs (seen 2026-11-20). Refused
+        // once per file: errors are fixed where they are.
+        if (!result && call.name === 'write_file' && lastCommand && !lastCommand.ok) {
+          const key = String(call.args?.path || '').replace(/\\/g, '/').toLowerCase();
+          const before = writtenFiles.get(key);
+          const count = (text) => String(text || '').split('\n').length;
+          if (before !== undefined && !shrunk.has(key) && count(before) >= 60 && count(call.args?.content) < count(before) * 0.75) {
+            shrunk.add(key);
+            result = {
+              ok: false,
+              summary: t('Not written: most of the file would be lost'),
+              output: `Not written: ${call.args?.path} has ${count(before)} lines and this would replace it with ${count(call.args?.content)}, leaving out parts of what the user asked for. A build error is fixed where it is: for each error, read the lines the compiler named (read_file with start_line) and correct them with replace_in_file, then build again. Keep every feature the file had. Write the whole file again only if the user asks for a smaller program.`,
               data: {},
             };
             cutWrite = null;
@@ -1446,7 +1501,7 @@ class AgentRunner {
         // A click, a key or a started program changes the screen: looking again is not a repeat.
         if (result.ok && (INPUT_TOOLS.includes(call.name) || call.name === 'run_command')) {
           for (const seen of [...seenCalls]) if (seen.startsWith('look_at_')) seenCalls.delete(seen);
-          if (call.name !== 'wait') freshScreen = false;
+          if (call.name !== 'wait') { freshScreen = false; unreadScreen = true; }
           if (call.name === 'mouse') {
             const key = clickKey(call.args);
             sameClicks = key === lastClick ? sameClicks + 1 : 1;
@@ -1464,6 +1519,7 @@ class AgentRunner {
           for (const seen of [...seenCalls]) if (INPUT_TOOLS.some((name) => seen.startsWith(`${name}:`))) seenCalls.delete(seen);
           // A closer look at one part changes nothing on the screen: the whole-screen picture before it is still the map.
           if (!result.data?.zoomed) freshScreen = !call.args?.window;
+          unreadScreen = false;
         }
         // Closer looks in a row, with nothing else in between.
         closerLooks = call.name === 'look_at_screen' && call.args?.zoom ? closerLooks + 1 : 0;

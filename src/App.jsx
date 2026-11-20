@@ -437,10 +437,10 @@ export default function App() {
     }
   };
 
-  const runBenchmark = async () => {
+  const runBenchmark = async (options) => {
     setView('benchmark');
     try {
-      const status = await api.runBenchmark();
+      const status = await api.runBenchmark(options?.optimize ? { optimize: true } : undefined);
       setBenchmarkProgress(status.progress);
     } catch (err) {
       showToast(err.message, 'error');
@@ -654,7 +654,8 @@ export default function App() {
               boot={boot}
               progress={benchmarkProgress}
               history={benchmarks}
-              onRun={runBenchmark}
+              onRun={() => runBenchmark()}
+              onOptimize={() => runBenchmark({ optimize: true })}
               onCancel={cancelBenchmark}
               onClear={clearBenchmarks}
               onOpenModels={() => setView('models')}

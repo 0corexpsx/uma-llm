@@ -1023,6 +1023,8 @@ function registerIpc() {
       draftSuggestion: !draftCandidates.length && suggestion && ownSize(entry) > suggestion.sizeBytes * 3 ? suggestion : null,
       // The batch sizes measured for this model with the current helper PCs and engine.
       batchTuning: { ...(await batchTuner.report(llama.batchKey(entry, store.getRuntime()))), byHand: overrides.ubatchSize !== undefined },
+      // This PC's graphics cards as the engine names them, when it has several.
+      cards: await llama.engineCards(store.getRuntime()).catch(() => []),
     };
   });
   // Measures the three batch sizes now: the model is loaded with each and reads a fixed text twice.

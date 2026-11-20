@@ -291,14 +291,28 @@ When a model loads, Uma asks the engine which cards it can use and plans the spl
 - **It does not fit**: the cards are filled and the rest stays in RAM.
 - If a plan does not load, Uma tries the fill plan, then llama.cpp's own split.
 
-The plan is in the model panel on the right and in the log (`[uma] plan for 3 graphics cards …`). Layers on different cards run one after the other, so several cards add memory, not speed: a model that fits on one card is as fast there as on three.
+The plan is in the model panel on the right and in the log (`[uma] plan for 3 graphics cards …`). By default layers on different cards run one after the other, so several cards add memory, not speed.
+
+**Getting more speed out of several cards.** Two settings of each model (**Models → the model's settings → Speed**) change that, and **Optimize and benchmark** in the Benchmark tab measures them and chooses for you:
+
+- **Graphics cards used**: all cards, one card alone, or the cards of the same kind together. A model that fits on one card is faster there than shared between several.
+- **Split between graphics cards**: `auto`/`layer` (one card after the other) or `tensor` (the cards work at the same time; llama.cpp calls it experimental). `row` does not load on NVIDIA cards.
+
+Measured on an RTX 3060 (12 GB) with two Tesla P40 (24 GB each), llama.cpp b12428, tokens written per second:
+
+| Model | All three, `layer` | All three, `tensor` | The two P40, `layer` | The two P40, `tensor` | RTX 3060 alone |
+|---|---|---|---|---|---|
+| Qwen3.8 27B Q8 (30 GB) | 6.6 | 9.0 | 7.4 | **12.5** | does not fit |
+| Qwen3.8 9B Q8 (10 GB) | 22.4 | 21.8 | not measured | not measured | **35.5** |
+
+Cards of the same kind work best together: the smaller, different card slowed the other two down.
 
 **A card that is not used.** If the engine does not list a card, nothing can run on it, and the model panel says *Not used by this engine*. The usual reasons:
 
 - **Tesla P40, GTX 10 and older cards need a CUDA 12 engine.** CUDA 13 has no code for them. Their last driver is the 580 series, with which Uma installs CUDA 12.4 by itself.
 - **Vulkan cannot see a card in compute-only (TCC) mode**, which is how Tesla cards run on Windows. Use the CUDA engine.
 
-This was tested with stand-ins for the cards (`scripts/test-review.cjs`), not on a PC with several cards.
+The plan and its fallbacks are tested with stand-ins for the cards (`scripts/test-review.cjs`); the speeds above were measured on the real cards.
 
 ## PC helpers
 
@@ -329,6 +343,33 @@ The gauge icon opens a local performance lab. One run produces:
 - **GPU utilization and VRAM** — sampled from `nvidia-smi` when an NVIDIA GPU is present.
 - **CPU and RAM** — the `llama-server` process's CPU time and working set, plus system RAM.
 - **Model load time** — reported separately from generation, so a cold load does not flatter the score.
+
+**Optimize and benchmark** looks for the fastest settings of the active model on this PC before it measures. It loads the model several times, each time with one thing changed, and writes a short fixed reply:
+
+- the number of GPU layers chosen by Uma, when a number was set by hand;
+- with several graphics cards: all of them one after the other or at the same time, each kind of card alone when the model fits on it, and cards of the same kind together;
+- the number of CPU threads;
+- guessing ahead (below) on or off.
+
+The fastest combination is saved in the model's own settings, but only when it is at least 3% faster than what the model had; the result lists everything that was tried with its speed. Nothing is saved when the run is cancelled. With a 30 GB model it takes about eight minutes. Run it again after changing the cards, the engine or the model's context size.
+
+### Guessing ahead without a second model
+
+Uma turns on two ways of writing faster that need nothing downloaded. In both the model checks every guessed word, so the text is the same as without them; only the speed changes. Each has a switch in the model's settings under **Speed**, and a load that fails with them is tried again without.
+
+- **The model's own head (MTP).** Some models carry a small head that predicts the words after the next one (their file says so; "MTP" is often in the name). Uma uses it when the model has one and the engine can (`--spec-type draft-mtp`). A draft model chosen by hand is used instead of it, and it is left out with helper PCs.
+- **Repeated text (n-gram).** When the model writes text that is already in the chat, such as a file written again with a small change, the engine guesses the repeated part (`ngram-mod`). New text is written at the usual speed.
+
+Measured with llama.cpp b12428 on two Tesla P40 (Qwen3.8 27B Q8, `tensor` split), tokens written per second:
+
+| | New prose | A function written again with one name changed |
+|---|---|---|
+| Neither | 12.6 | 12.6 |
+| MTP head | 25.5 | 31.3 |
+| N-gram | 12.6 | 86.6 |
+| Both (Uma's default) | 25.6 | 108.5 |
+
+The rewrite test is close to the best case for n-gram guessing (forty nearly identical lines); real code repeats less.
 
 The benchmark uses the active model, runs a fixed 128-token prompt-cache-off generation, and stores the last 12 runs in `benchmarks.json`. CPU/RAM sampling is Windows-native; NVIDIA GPU metrics require `nvidia-smi`. On AMD/Intel GPUs the backend and VRAM may be reported without per-GPU utilization.
 

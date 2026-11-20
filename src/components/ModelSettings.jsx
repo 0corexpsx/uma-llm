@@ -25,6 +25,18 @@ function NumberField({ label, hint, value, step = 1, onChange }) {
   );
 }
 
+/** The choices for "Graphics cards used": each card alone, and cards of the same kind together. */
+function cardChoices(cards) {
+  const short = (name) => String(name || '').replace(/^NVIDIA\s+(GeForce\s+)?/i, '');
+  const choices = cards.map((card) => ({ value: card.name, label: `${card.name} · ${short(card.card)}` }));
+  const kinds = new Map();
+  for (const card of cards) kinds.set(card.card, [...(kinds.get(card.card) || []), card.name]);
+  for (const [kind, names] of kinds) {
+    if (names.length > 1 && names.length < cards.length) choices.push({ value: names.join(','), label: `${names.join(' + ')} · ${names.length}× ${short(kind)}` });
+  }
+  return choices;
+}
+
 function SelectField({ label, hint, value, options, onChange }) {
   return (
     <Field label={label} hint={hint}>
@@ -265,6 +277,24 @@ export default function ModelSettings({ modelId, hardware, onClose, onSaved, sho
           </div>
 
           <h4>{t('Speed')}</h4>
+          {details.cards?.length > 1 && (
+            <div className="mset-grid">
+              <Field label={t('Graphics cards used')} hint={t('A model that fits on one card is usually faster on that card alone than shared between several. “Optimize and benchmark” in Benchmark measures this and chooses for you.')}>
+                <select className="select" value={form.gpuCards || ''} onChange={(event) => set('gpuCards')(event.target.value)}>
+                  <option value="">{t('All cards')}</option>
+                  {cardChoices(details.cards).map((choice) => <option value={choice.value} key={choice.value}>{choice.label}</option>)}
+                  {form.gpuCards && !cardChoices(details.cards).some((choice) => choice.value === form.gpuCards) && <option value={form.gpuCards}>{form.gpuCards}</option>}
+                </select>
+              </Field>
+              <SelectField label={t('Split between graphics cards')} hint={t('Only for a PC with several graphics cards. auto and layer: each card holds some layers and they work one after the other. tensor (experimental in llama.cpp): the cards work at the same time, which was faster for a model too large for one card (9.0 instead of 6.7 tok/s for a 27B model on an RTX 3060 and two Tesla P40) and no faster for a small one. row does not work with NVIDIA cards. Go back to auto if the model does not load.')} value={form.splitMode || 'auto'} options={['auto', 'layer', 'tensor', 'row']} onChange={set('splitMode')} />
+            </div>
+          )}
+          <div className="mset-grid">
+            {details.info?.mtpLayers > 0 && (
+              <SelectField label={t('Guess ahead with the model’s own head (MTP)')} hint={t('This model has a small head of its own that guesses the next words, and the model checks them in one step: the same text, written faster (12.6 to 25.5 tok/s on a 27B model), with nothing to download. auto uses it when the engine can. A draft model chosen below is used instead.')} value={form.mtp || 'auto'} options={['auto', 'off']} onChange={set('mtp')} />
+            )}
+            <SelectField label={t('Guess repeated text (n-gram)')} hint={t('When the model writes text that is already in the chat, such as a file written again with a small change, the engine guesses the repeated part and the model only checks it: the same text, several times faster there. New text is written at the usual speed. auto turns it on when the engine can.')} value={form.ngram || 'auto'} options={['auto', 'off']} onChange={set('ngram')} />
+          </div>
           <Field
             label={t('Draft model')}
             hint={t('A small model of the same family guesses the next words, and this model checks several at once, so answers are written faster. With a helper PC connected, it runs on the helper’s GPU, which otherwise waits most of the time. The speed line under each reply shows how many guesses were kept.')}

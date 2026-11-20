@@ -40,8 +40,8 @@ const OFFERS_RE = /(?:would you like me to|do you want me to|shall i|should i|wa
 const SYSTEM_INSTALL_RE = /\b(?:winget|choco|scoop)\s+(?:install|upgrade|add)\b|\bmsiexec\b|\bAdd-AppxPackage\b|\bInstall-(?:Package|Module|Script)\b|\b(?:npm|pnpm|yarn)\s+(?:install|i|add)\b[^\n]*\s(?:-g|--global)\b|\bbrew\s+install\b|\bapt(?:-get)?\s+install\b/i;
 const ASKS_INSTALL_RE = /\b(?:install|installa|setup|set up|download|scarica|update|upgrade|aggiorna|winget|choco|scoop|brew|apt)\b/i;
 const CONTINUE_RE = /^\s*(continue|keep going|go on|finish|proceed|resume|retry|try again)\b/i;
-const ACTION_RE = /\b(analy[sz]e|review|fix|debug|patch|refactor|build|implement|audit|update|make|create|add|change|optimi[sz]e|rewrite|rebuild|redesign|edit|improve|clean|rename|remove|delete|inspect|explain|summari[sz]e|find|check|look|read|list|write|style|map|search|organi[sz]e|tidy|commit|test|compile|restyle|document)\b/i;
-const EDIT_RE = /\b(fix|patch|refactor|build|implement|update|make|create|add|change|optimi[sz]e|rewrite|rebuild|redesign|edit|improve|clean|rename|remove|delete|write|style|restyle|compile|document)\b/i;
+const ACTION_RE = /\b(analy[sz]e|review|fix|debug|patch|refactor|build|implement|audit|update|make|create|add|change|optimi[sz]e|rewrite|rebuild|redesign|edit|improve|clean|rename|remove|delete|inspect|explain|summari[sz]e|find|check|look|read|list|write|style|map|search|organi[sz]e|tidy|commit|test|compile|restyle|document|remake|redo|recreate|convert|port|generate|develop|modify|adjust|replace)\b/i;
+const EDIT_RE = /\b(fix|patch|refactor|build|implement|update|make|create|add|change|optimi[sz]e|rewrite|rebuild|redesign|edit|improve|clean|rename|remove|delete|write|style|restyle|compile|document|remake|redo|recreate|convert|port|generate|develop|modify|adjust|replace)\b/i;
 const QUESTION_RE = /^\s*(how|what|why|when|where|who|which|is|are|does|do|did|has|have|had|was|were|should|could|would)\b/i;
 const SKILL_HINT_RE = /\b(web|online|internet|look up|latest)\b/i;
 const WEB_REQUEST_RE = /\b(search|look|find|check|browse)\b.*\b(web|online|internet)\b|\blook up\b|\bgoogle\b/i;
@@ -68,7 +68,13 @@ const FOLLOW_UP_RE = /\b(this|that|it|them|these|those)\b/i;
 const LONG_CODE_BLOCK_RE = /```[^\n]*\n(?:[^\n]*\n){14}/;
 // A report that what the work produced does not behave ("I still can't see the list"). In a chat
 // that has been working on files it asks for a fix, even without a file or code word in it.
-const PROBLEM_RE = /\b(?:can'?t|can`t|cannot|doesn'?t|dosent|does not|don'?t|won'?t|isn'?t|not (?:working|showing|shown|visible|loading|opening|starting|updating)|still|same (?:problem|issue|error)|broken|bug|crash(?:es|ed)?|errors?|fails?|failed|wrong|missing|empty|blank|white|nothing (?:happens|shows)|look(?:s)? (?:bad|nice|wrong|ugly))\b/i;
+const PROBLEM_RE = /\b(?:can'?t|can`t|cannot|doesn'?t|dosent|does not|don'?t|won'?t|isn'?t|not (?:working|showing|shown|visible|loading|opening|starting|updating|there)|still|same (?:problem|issue|error)|broken|bug|crash(?:es|ed)?|errors?|fails?|failed|wrong|missing|empty|blank|white|nothing (?:happens|shows|there|is there|changed|works)|(?:there(?:'s| is)|i (?:see|get|have|got)) nothing|look(?:s)? (?:bad|nice|wrong|ugly))\b/i;
+// What the user wants the work to become, said without a verb Uma knows ("I want a GUI version like
+// the Windows 7 one", or with a typo in the verb: "reamke it to looks like windows xp"). In a chat
+// that has been working on files this asks for that work. Seen 2026-11-19: both were read as plain
+// talk, the tools that write files were taken away, and a real model pasted the whole program into
+// the chat, turn after turn, then named an .exe that was never built.
+const WANT_RE = /\b(?:i want|i need|i(?: would|'d) like|give me|(?:to|should|must|make it|it) look(?:s|ing)? like|instead)\b/i;
 // "The build succeeded", "has been rebuilt": only true when a command that ran said so.
 const CLAIMS_BUILD_RE = /\b(?:(?:the )?build (?:succeeded|was successful|is successful|completed)|(?:has|have) been (?:rebuilt|compiled|built)|(?:compiles|builds) (?:successfully|without errors))\b/i;
 // The note Uma adds to earlier replies in the history; a model sometimes starts writing one itself.
@@ -84,6 +90,9 @@ const PROGRAM_FILE_RE = /\.(?:exe|dll|com|msi|bat|cmd|ps1|sh|app|dylib|so)$/i;
 const LINK_RE = /https?:\/\/[^\s<>"'`)\]]+/gi;
 // "I can see the page is open in Brave", "the screen shows…": only true after a picture was taken.
 const CLAIMS_SIGHT_RE = /\b(?:i (?:can )?see (?:the|that|your|a|an) [^.\n]{0,50}?\b(?:page|screen|window|browser|tab|desktop|site|website|screenshot|display|monitor|taskbar|interface|wallpaper)\b|here is (?:a summary of )?what i (?:can )?see\b|is open in (?:brave|chrome|edge|firefox|safari|the browser|your browser)|the (?:[\w-]+ ){0,3}(?:page|screen|window|screenshot|display|desktop) shows)\b/i;
+// "You can see it in the top-left of the screen", "…a memory bar showing "28471 MB / 65031 MB"": the
+// reply tells the user what is on the screen, or quotes it.
+const QUOTES_SCREEN_RE = /\byou can see (?:it|the|that|a|an)\b[^.\n]{0,80}\b(?:screen|window|desktop|taskbar|top|bottom|left|right|corner)\b|\b(?:showing|shows|displays|displaying|reads|reading)\b[^.\n]{0,40}["“][^"”\n]{3,80}["”]/i;
 // What a reply about the user's screen talks about: for a model that cannot see, it is invented.
 const SCREEN_WORDS_RE = /\b(?:screen|display|desktop|monitor|taskbar|wallpaper|task manager|window[s]? (?:is|are) open)\b/i;
 // "what do you see?", "can you see my screen?", "look at my display": a question only eyes can answer.
@@ -478,16 +487,18 @@ function classifyTask(original, { priorTask = '', priorUsedTools = false, attach
     // The attached file is what this is about, unless the message also points at the project.
     const rest = attachmentNames.reduce((remaining, name) => remaining.split(name).join(' '), text);
     if (!/\b(project|workspace|repo|repository|codebase|folder)\b/i.test(rest) && !NAMED_FILE_RE.test(rest)) {
-      return { isContinue, agentic: false, wantsEdit: false, priorTask: '' };
+      return { isContinue, agentic: false, wantsEdit: false, priorTask: '', workChat: priorUsedTools };
     }
   }
   if (isContinue) {
-    const prior = priorTask ? classifyTask(priorTask) : { agentic: false, wantsEdit: false };
+    // The task being resumed is read as it was read then: in a chat that works on files.
+    const prior = priorTask ? classifyTask(priorTask, { priorUsedTools }) : { agentic: false, wantsEdit: false };
     return {
       isContinue,
       agentic: prior.agentic || priorUsedTools,
       wantsEdit: prior.wantsEdit,
       priorTask,
+      workChat: priorUsedTools,
     };
   }
   // "If I give you X, can you make Y?" asks whether something is possible. Let the model answer it.
@@ -501,17 +512,25 @@ function classifyTask(original, { priorTask = '', priorUsedTools = false, attach
   // "What is this project?" names no action, but it can only be answered by looking.
   // In a chat that has been working on files, "fix the task manager" or "I still can't see the
   // processes" belongs to that work, though it names no file.
-  const followsWork = priorUsedTools && (ACTION_RE.test(text) || PROBLEM_RE.test(text));
+  const followsWork = priorUsedTools && (ACTION_RE.test(text) || PROBLEM_RE.test(text) || WANT_RE.test(text));
   // A question about a named file ("did you fix the bug in main.cpp?") is answered by looking at it.
-  const agentic = (about && (question ? OWNED_RE.test(text) || NAMED_FILE_RE.test(text) : ACTION_RE.test(text))) || followsWork;
+  // So is a question about what the work in this chat made ("where is the exe?"): answered from
+  // memory, a real model named a folder and a file that did not exist.
+  const agentic = (about && (question ? OWNED_RE.test(text) || NAMED_FILE_RE.test(text) || priorUsedTools : ACTION_RE.test(text))) || followsWork;
   return {
     isContinue,
     agentic,
-    wantsEdit: agentic && !question && (EDIT_RE.test(text) || (priorUsedTools && PROBLEM_RE.test(text))),
+    wantsEdit: agentic && !question && (EDIT_RE.test(text) || (priorUsedTools && (PROBLEM_RE.test(text) || WANT_RE.test(text)))),
     asksOnly: ASKS_ONLY_RE.test(text) && !POLITE_REQUEST_RE.test(text),
     priorTask: '',
+    // The chat has been working on the user's files (see AgentRunner.taskFor).
+    workChat: priorUsedTools,
   };
 }
+
+// "Let me rebuild the project." and then the command as a code block, where a call to run_command
+// was meant: nothing ran, and the user is left with a command to type. Seen 2026-11-19, twice in a row.
+const COMMAND_IN_CHAT_RE = /\b(?:let me|let'?s|i'?ll|i will|i am going to|i'm going to)\b[^\n]*\n+\s*```(?:powershell|pwsh|ps1|ps|cmd|bat|batch|bash|sh|shell|console|terminal)?[ \t]*\n[^`]{3,800}```\s*$/i;
 
 const READ_ONLY_COMMAND_RE = /^\s*(?:get-childitem|gci|dir|ls|get-content|gc|type|cat|test-path|get-location|pwd|get-command|get-item|resolve-path|where(?:\.exe)?|select-string|findstr|echo|write-output|winget\s+(?:search|list|show)|[\w.-]+\s+(?:--version|-v))(?:\s|$)/i;
 const READ_ONLY_PIPE_RE = /^\s*(?:select-object|select|where-object|where|sort-object|sort|format-\w+|ft|fl|measure-object|out-string|findstr|select-string)(?:\s|$)/i;
@@ -580,6 +599,10 @@ async function namedFolder(text, workspaceRoot = '') {
     for (let count = words.length; count > 0; count -= 1) {
       const candidate = words.slice(0, count).join(' ').replace(/[.,;:!?)\]>]+$/, '').replace(/[\\/]+$/, '') || words[0];
       if (!candidate || candidate.length < 3) continue;
+      // Cut in the middle of a folder name: "…\Documents\UMA LLM" out of "…\Documents\UMA LLM
+      // Project\notes" is another folder than the one that was written, even when it exists.
+      const next = words[count] || '';
+      if (/[\\/]/.test(next) && !/^(?:[A-Za-z]:[\\/]|\\\\|\/)/.test(next)) continue;
       const stat = await fsp.stat(candidate).catch(() => null);
       if (!stat) continue;
       // A program (in a command the user pasted) or a system folder is not what the chat is about.
@@ -603,5 +626,6 @@ module.exports = {
   sameWords, CANNOT_INPUT_RE, PRETENDS_INPUT_RE, repeatsItself, LOOP_AT_END_RE, LOOP_RE, loopsInLine, withoutLoops, withoutRepeats, TOOL_NAMES_RE,
   CLAIMS_TOOL_RE, toolsClaimed, says, NOT_A_CLAIM_RE, claims, SAYS_MISSING_RE, previousReplyText, saysMissing, meaningWords, foldRepeatedAnswers,
   CLAIMS_DONE_RE, BROWSERS, siteSearch, siteSearchNote, EMAIL_REQUEST_RE, emailNote, RECALL_RE, chatRecap, CLAIMS_CHANGE_RE, ANNOUNCES_NEXT_STEP_RE,
+  COMMAND_IN_CHAT_RE, WANT_RE, QUOTES_SCREEN_RE,
   classifyTask, READ_ONLY_COMMAND_RE, READ_ONLY_PIPE_RE, isReadOnlyCommand, maxOutputTokens, toolTitle, WINDOWS_PATH_RE, UNIX_PATH_RE, namedFolder,
 };
