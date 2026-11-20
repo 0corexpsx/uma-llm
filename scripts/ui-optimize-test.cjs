@@ -18,7 +18,14 @@ const dataDir = path.join(root, '.testdata', 'ui-optimize', 'data');
 fs.rmSync(dataDir, { recursive: true, force: true });
 fs.mkdirSync(dataDir, { recursive: true });
 fs.mkdirSync(shots, { recursive: true });
-fs.writeFileSync(path.join(dataDir, 'settings.json'), JSON.stringify({ acceptedTermsVersion: require('../package.json').version, language: 'en', workspacePath: path.join(root, 'demo-workspace'), loadModelAtStart: false, loadOnTyping: false, activeModelId: 'm' }));
+fs.writeFileSync(path.join(dataDir, 'settings.json'), JSON.stringify({ acceptedTermsVersion: require('../package.json').version, language: 'en', workspacePath: path.join(root, 'demo-workspace'), loadModelAtStart: false, activeModelId: 'm' }));
+// Getting ready while the user types: what the screen asks of the app is recorded here instead of
+// being done (the stand-in engine must never be started).
+const warmed = [];
+require('../electron/lib/agent.cjs').AgentRunner.prototype.warm = function warm(conversationId) {
+  warmed.push(conversationId || null);
+  return Promise.resolve(false);
+};
 // A stand-in model (a small but real GGUF file, with a head for guessing ahead) and a stand-in
 // engine that is never started: the screens show results and settings only with both.
 const standIn = path.join(dataDir, 'stand-in.gguf');
@@ -124,11 +131,37 @@ async function run() {
   await sleep(300);
   fs.writeFileSync(path.join(shots, 'optimize.png'), (await page.capturePage()).toPNG());
 
-  // Settings: the switch for getting the model ready while a message is written (off in this test's settings).
+  // The first character of a message asks the app to get the model ready, once for that message.
+  const write = (text) => ask(`(() => { const box = document.querySelector('.composer textarea, textarea'); if (!box) return false; Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(box, ${JSON.stringify(text)}); box.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`);
+  await ask("document.querySelector('.rail-item[data-view=\"chat\"]').click()");
+  await waitFor("Boolean(document.querySelector('textarea'))", 'the message box');
+  if (warmed.length) throw new Error('nothing is got ready before a message is begun');
+  await write('h');
+  await sleep(500);
+  await write('hello there');
+  await sleep(500);
+  log(`asked to get ready: ${JSON.stringify(warmed)}`);
+  if (warmed.length !== 1) throw new Error(`one message asks once to get ready, not ${warmed.length} times`);
+  await write('');
+  await sleep(300);
+  await write('again');
+  await sleep(500);
+  if (warmed.length !== 2) throw new Error(`a new message asks again: ${warmed.length}`);
+  await write('');
+
+  // Settings: the switch for it is on by default, and turned off, a message asks for nothing.
   await ask("(document.querySelector('.rail-item[data-view=\"settings\"]') || document.querySelector('.rail-bottom .rail-item')).click()");
   await waitFor("Boolean(document.querySelector('[role=switch][aria-label=\"Get ready while I type\"]'))", 'the "Get ready while I type" switch');
-  const ready = await ask("document.querySelector('[role=switch][aria-label=\"Get ready while I type\"]').getAttribute('aria-checked')");
-  if (ready !== 'false') throw new Error(`"Get ready while I type" should show what the settings hold (off): ${ready}`);
+  const ready = () => ask("document.querySelector('[role=switch][aria-label=\"Get ready while I type\"]').getAttribute('aria-checked')");
+  if ((await ready()) !== 'true') throw new Error(`"Get ready while I type" is on unless turned off: ${await ready()}`);
+  await ask("document.querySelector('[role=switch][aria-label=\"Get ready while I type\"]').click()");
+  await waitFor("document.querySelector('[role=switch][aria-label=\"Get ready while I type\"]').getAttribute('aria-checked') === 'false'", 'the switch turned off');
+  await ask("document.querySelector('.rail-item[data-view=\"chat\"]').click()");
+  await waitFor("Boolean(document.querySelector('textarea'))", 'the message box');
+  await write('hello');
+  await sleep(600);
+  if (warmed.length !== 2) throw new Error(`with the switch off nothing is got ready: ${warmed.length}`);
+  await write('');
 
   // A model's settings: the switch for its own head (this stand-in has one), and the search box.
   await ask("document.querySelector('.rail-item[data-view=\"models\"]').click()");
