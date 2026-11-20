@@ -155,6 +155,21 @@ export default function Inspector({
               ])).join(' · ')}
             </p>
           )}
+          {server?.running && server.onlyCards?.length === 1 && !server.placement && (
+            <p className="inspector-helpers" title={t('A model that fits on one card is usually faster on that card alone than shared between several. Change it in the model’s settings under Speed, or let “Optimize and benchmark” choose.')}>
+              <Layers size={12} />{' '}{t('Runs on {0} alone, as chosen for this model', [server.onlyCards[0]])}
+            </p>
+          )}
+          {server?.running && server.splitMode === 'tensor' && !server.helpers?.servers?.length && (
+            <p className="inspector-helpers" title={t('The cards that hold this model work on every word at the same time (llama.cpp’s tensor split), not one after the other. Change it in the model’s settings under Speed.')}>
+              <Layers size={12} />{' '}{t('The cards work at the same time')}
+            </p>
+          )}
+          {server?.running && server.speculation && (
+            <p className="inspector-helpers" title={t('The engine guesses the next words and the model checks each one, so it still decides every word and only writes faster. The speed line under each reply shows how many guesses were kept. Both kinds have a switch in the model’s settings under Speed.')}>
+              <Layers size={12} />{' '}{t('Guessing ahead: {0}', [[server.speculation.mtp ? t('the model’s own head (MTP)') : '', server.speculation.ngram ? t('repeated text') : ''].filter(Boolean).join(' · ')])}
+            </p>
+          )}
           {server?.running && server.unusedGpus?.length > 0 && (
             <p className="inspector-helpers is-warning" title={t('This PC has these graphics cards, but the installed engine does not list them, so nothing runs on them. Try another engine in Models: a Tesla P40 or a GTX 10 card needs CUDA 12.')}>
               <Layers size={12} />{' '}{t('Not used by this engine: {0}', [server.unusedGpus.join(', ')])}

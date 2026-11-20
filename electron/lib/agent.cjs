@@ -155,6 +155,47 @@ class AgentRunner {
     );
   }
 
+  /** The memory notes a chat's instructions hold: the chat's own, or, for one not begun, today's. */
+  async memoryTextFor(conversation, settings) {
+    if (!this.memory || settings.useMemory === false) return '';
+    let kept = conversation?.memory?.items;
+    if (!kept) {
+      const snapshot = await this.memory.forPrompt();
+      kept = (await this.memory.list()).filter((item) => snapshot.ids.includes(item.id));
+    }
+    return kept.map((item) => `- ${item.text}`).join('\n');
+  }
+
+  /**
+   * Gets the model ready before the message is sent: loads it if it is asleep, and has the engine
+   * read Uma's instructions, which every first message otherwise waits for (in the user's chat of
+   * 2026-11-20 the first word took 37 s: 18 s to load the model after it had gone idle, 12 s to
+   * read 3,100 tokens of instructions). Called when the user starts typing and after the model
+   * loads at start. Does nothing for a chat whose memory is on disk (that is read back instead),
+   * nor once the engine has read anything: it never touches what a chat left in the engine.
+   */
+  warm(conversationId = null) {
+    if (this.current || this.warming) return this.warming || Promise.resolve(false);
+    this.warming = (async () => {
+      const model = await this.models.resolveActive();
+      if (!model || !this.workspace) return false;
+      await this.llama.ensureServer(model);
+      if (this.current || !this.llama.canWarm()) return false;
+      const conversation = conversationId ? await this.conversations.get(conversationId).catch(() => null) : null;
+      if (conversation && await this.llama.hasMemoryOf(conversation.id)) return false;
+      // The same instructions run() builds, from the same parts.
+      const settings = this.store.getEffectiveSettings(model.id);
+      const { summary } = await this.workspaceForPrompt();
+      const slots = settings.kvUnified ? 1 : Math.max(1, settings.parallel || 1);
+      const maxTokens = maxOutputTokens(Math.floor((settings.contextSize || 8192) / slots));
+      const skills = (await this.toolRunner.skills?.enabled(this.workspace.root)) || [];
+      const basePrompt = systemPrompt({ workspaceSummary: summary, settings, model, maxTokens, skills, memoryText: await this.memoryTextFor(conversation, settings) });
+      if (this.current || !this.llama.canWarm()) return false;
+      return this.llama.warm([{ role: 'system', content: basePrompt }, { role: 'user', content: '.' }]);
+    })().catch(() => false).finally(() => { this.warming = null; });
+    return this.warming;
+  }
+
   stop(conversationId) {
     if (!this.current) return false;
     if (conversationId && this.current.conversationId !== conversationId) return false;

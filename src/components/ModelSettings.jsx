@@ -1,7 +1,7 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { AlertTriangle, Check, RotateCcw } from 'lucide-react';
 import { api } from '../api.js';
-import { Button, Field, Modal, Spinner, Toggle, formatBytes } from './ui.jsx';
+import { Button, Field as BaseField, Modal, Spinner, Toggle, formatBytes } from './ui.jsx';
 import { t } from '../i18n.js';
 
 const CACHE_TYPES = ['f32', 'f16', 'bf16', 'q8_0', 'q4_0', 'q4_1', 'iq4_nl', 'q5_0', 'q5_1'];
@@ -25,16 +25,34 @@ function NumberField({ label, hint, value, step = 1, onChange }) {
   );
 }
 
-/** The choices for "Graphics cards used": each card alone, and cards of the same kind together. */
+/**
+ * The choices for "Graphics cards used": one card of each kind, and several cards of the same kind
+ * together. A choice names the cards ("Tesla P40,Tesla P40"), not the engine's numbering of them,
+ * so it still means the same cards after a driver update or a card moved to another slot.
+ */
 function cardChoices(cards) {
   const short = (name) => String(name || '').replace(/^NVIDIA\s+(GeForce\s+)?/i, '');
-  const choices = cards.map((card) => ({ value: card.name, label: `${card.name} · ${short(card.card)}` }));
   const kinds = new Map();
-  for (const card of cards) kinds.set(card.card, [...(kinds.get(card.card) || []), card.name]);
-  for (const [kind, names] of kinds) {
-    if (names.length > 1 && names.length < cards.length) choices.push({ value: names.join(','), label: `${names.join(' + ')} · ${names.length}× ${short(kind)}` });
+  for (const card of cards) kinds.set(card.card, (kinds.get(card.card) || 0) + 1);
+  const choices = [];
+  for (const [kind, count] of kinds) {
+    for (let take = 1; take <= count; take += 1) {
+      // Every card of the PC is "All cards".
+      if (take === cards.length) continue;
+      choices.push({ value: Array(take).fill(kind).join(','), label: take > 1 ? `${take}× ${short(kind)}` : count > 1 ? t('One {0}', [short(kind)]) : short(kind) });
+    }
   }
   return choices;
+}
+
+// What is typed into "Find a setting": fields whose name or explanation does not hold it are hidden.
+const FilterContext = createContext('');
+
+/** A setting's row, hidden while the search box holds words that are not in its name or explanation. */
+function Field({ label, hint, ...rest }) {
+  const query = useContext(FilterContext);
+  if (query && !`${label || ''} ${hint || ''}`.toLowerCase().includes(query)) return null;
+  return <BaseField label={label} hint={hint} {...rest} />;
 }
 
 function SelectField({ label, hint, value, options, onChange }) {
@@ -80,6 +98,8 @@ export default function ModelSettings({ modelId, hardware, onClose, onSaved, sho
   const [estimating, setEstimating] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  // "Find a setting": the words typed into the box above the settings.
+  const [query, setQuery] = useState('');
   const latest = useRef(0);
   const [tuning, setTuning] = useState(null);
   const [tuned, setTuned] = useState(null);
@@ -192,7 +212,9 @@ export default function ModelSettings({ modelId, hardware, onClose, onSaved, sho
       {error && <div className="modal-error">{error}</div>}
       {!form && !error && <div className="mset-loading"><Spinner size={16} />{' '}{t('Reading the model file…')}</div>}
       {form && (
-        <div className="mset-body">
+        <FilterContext.Provider value={query.trim().toLowerCase()}>
+        <div className={`mset-body ${query.trim() ? 'is-filtering' : ''}`}>
+          <input className="input mset-search" type="search" value={query} placeholder={t('Find a setting…')} aria-label={t('Find a setting…')} spellCheck={false} onChange={(event) => setQuery(event.target.value)} />
           <MemoryEstimate estimate={estimate} hardware={hardware} loading={estimating} />
           {estimate?.suggestedLayers > 0 && estimate.fit === 'too-big' && !gpuAuto && (
             <Button size="xs" variant="secondary" onClick={() => set('gpuLayers')(estimate.suggestedLayers)}>
@@ -291,9 +313,9 @@ export default function ModelSettings({ modelId, hardware, onClose, onSaved, sho
           )}
           <div className="mset-grid">
             {details.info?.mtpLayers > 0 && (
-              <SelectField label={t('Guess ahead with the model’s own head (MTP)')} hint={t('This model has a small head of its own that guesses the next words, and the model checks them in one step: the same text, written faster (12.6 to 25.5 tok/s on a 27B model), with nothing to download. auto uses it when the engine can. A draft model chosen below is used instead.')} value={form.mtp || 'auto'} options={['auto', 'off']} onChange={set('mtp')} />
+              <SelectField label={t('Guess ahead with the model’s own head (MTP)')} hint={t('This model has a small head of its own that guesses the next words, and the model checks each of them in one step, so it still decides every word and only writes faster (12.6 to 24 tok/s on a 27B model), with nothing to download. auto uses it when the engine can. A draft model chosen below is used instead.')} value={form.mtp || 'auto'} options={['auto', 'off']} onChange={set('mtp')} />
             )}
-            <SelectField label={t('Guess repeated text (n-gram)')} hint={t('When the model writes text that is already in the chat, such as a file written again with a small change, the engine guesses the repeated part and the model only checks it: the same text, several times faster there. New text is written at the usual speed. auto turns it on when the engine can.')} value={form.ngram || 'auto'} options={['auto', 'off']} onChange={set('ngram')} />
+            <SelectField label={t('Guess repeated text (n-gram)')} hint={t('When the model writes text that is already in the chat, such as a file written again with a small change, the engine guesses the repeated part and the model only checks it, which is several times faster there. New text is written at the usual speed. auto turns it on when the engine can.')} value={form.ngram || 'auto'} options={['auto', 'off']} onChange={set('ngram')} />
           </div>
           <Field
             label={t('Draft model')}
@@ -367,6 +389,7 @@ export default function ModelSettings({ modelId, hardware, onClose, onSaved, sho
             <input className="input" value={form.extraArgs} placeholder={t('--threads-http 4')} spellCheck={false} onChange={(event) => set('extraArgs')(event.target.value)} />
           </Field>
         </div>
+        </FilterContext.Provider>
       )}
     </Modal>
   );

@@ -92,7 +92,8 @@ const LINK_RE = /https?:\/\/[^\s<>"'`)\]]+/gi;
 const CLAIMS_SIGHT_RE = /\b(?:i (?:can )?see (?:the|that|your|a|an) [^.\n]{0,50}?\b(?:page|screen|window|browser|tab|desktop|site|website|screenshot|display|monitor|taskbar|interface|wallpaper)\b|here is (?:a summary of )?what i (?:can )?see\b|is open in (?:brave|chrome|edge|firefox|safari|the browser|your browser)|the (?:[\w-]+ ){0,3}(?:page|screen|window|screenshot|display|desktop) shows)\b/i;
 // "You can see it in the top-left of the screen", "…a memory bar showing "28471 MB / 65031 MB"": the
 // reply tells the user what is on the screen, or quotes it.
-const QUOTES_SCREEN_RE = /\byou can see (?:it|the|that|a|an)\b[^.\n]{0,80}\b(?:screen|window|desktop|taskbar|top|bottom|left|right|corner)\b|\b(?:showing|shows|displays|displaying|reads|reading)\b[^.\n]{0,40}["“][^"”\n]{3,80}["”]/i;
+// (Something on the screen must be named before the quoted words: "the build output shows "0 errors"" is not this.)
+const QUOTES_SCREEN_RE = /\byou can see (?:it|the|that|a|an)\b[^.\n]{0,80}\b(?:screen|window|desktop|taskbar|top|bottom|left|right|corner)\b|\b(?:window|screen|title bar|status bar|bar|button|label|dialog|menu|tab|list|column|header|caption)\b[^.\n]{0,80}\b(?:showing|shows|displays|displaying|reads|reading|says|saying)\b[^.\n]{0,40}["“][^"”\n]{3,80}["”]/i;
 // What a reply about the user's screen talks about: for a model that cannot see, it is invented.
 const SCREEN_WORDS_RE = /\b(?:screen|display|desktop|monitor|taskbar|wallpaper|task manager|window[s]? (?:is|are) open)\b/i;
 // "what do you see?", "can you see my screen?", "look at my display": a question only eyes can answer.

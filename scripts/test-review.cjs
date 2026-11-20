@@ -2346,7 +2346,7 @@ async function testSeveralGraphicsCards() {
   const smi = ['Tesla P40, 24576, 24210, 366, 0', 'NVIDIA GeForce RTX 3060, 12288, 11020, 1268, 87', 'Tesla P40, 24576, 24210, 366, 41', ''].join('\r\n');
   const cards = parseNvidiaCards(smi);
   assert.equal(cards.length, 3, 'every card is read, not only the first');
-  assert.deepEqual(cards[1], { name: 'NVIDIA GeForce RTX 3060', totalMB: 12288, freeMB: 11020, usedMB: 1268, percent: 87 });
+  assert.deepEqual(cards[1], { name: 'NVIDIA GeForce RTX 3060', totalMB: 12288, freeMB: 11020, usedMB: 1268, percent: 87, lanes: 0, lanesMax: 0 });
   assert.equal(gpuSummary(cards.map((card) => card.name)), '2× Tesla P40 + NVIDIA GeForce RTX 3060');
   assert.deepEqual(parseNvidiaCards(''), []);
   assert.deepEqual(parseNvidiaCards('NVIDIA GeForce RTX 2070, 8192, 7492, 700, [N/A]')[0].percent, 0, 'a card that does not report how busy it is');
@@ -2449,8 +2449,9 @@ async function testSeveralGraphicsCards() {
   starts = run.starts();
   assert.equal(starts.length, 1, 'one card: no plan to fall back from');
   assert.ok(after(starts[0], '-dev') === 'CUDA0' && after(starts[0], '-ngl') === 'all' && !starts[0].includes(' -ts '), starts[0]);
-  assert.equal(after(starts[0], '--split-mode'), 'tensor');
+  assert.ok(!starts[0].includes('--split-mode'), 'one card has nothing to share, whatever the setting says');
   assert.match(run.lines.join('\n'), /only CUDA0 NVIDIA GeForce RTX 3060 is used, as chosen for this model/);
+  assert.deepEqual([run.manager.status().onlyCards, run.manager.status().splitMode], [[], ''], 'nothing is reported for an engine that is not running');
   assert.deepEqual(run.manager.cards.all.map((device) => device.name), ['CUDA0', 'CUDA1', 'CUDA2']);
   assert.equal(run.manager.computeInfo().gpuName, 'NVIDIA GeForce RTX 3060');
   run = make(layers(40, 480), all);
@@ -2465,9 +2466,9 @@ async function testSeveralGraphicsCards() {
   // only for a model that has one; a load that fails with it is tried again without it.
   const { speculationArgs, speculationSupport } = require('../electron/lib/modelSettings.cjs');
   const help = '--spec-type none,draft-simple,draft-eagle3,draft-mtp,draft-dflash,ngram-simple,ngram-mod,ngram-cache\n   comma-separated list of types';
-  assert.deepEqual(speculationSupport(help), { mtp: true, ngram: true });
-  assert.deepEqual(speculationSupport('--spec-type none,draft-simple\n'), { mtp: false, ngram: false });
-  assert.deepEqual(speculationSupport(''), { mtp: false, ngram: false });
+  assert.deepEqual(speculationSupport(help), { mtp: true, ngram: true, loadMode: false, cacheRam: false });
+  assert.deepEqual(speculationSupport('--spec-type none,draft-simple\n'), { mtp: false, ngram: false, loadMode: false, cacheRam: false });
+  assert.deepEqual(speculationSupport(''), { mtp: false, ngram: false, loadMode: false, cacheRam: false });
   assert.deepEqual(speculationArgs({ mtp: true, ngram: true }), ['--spec-type', 'draft-mtp,ngram-mod']);
   assert.deepEqual(speculationArgs({}), []);
   const guessing = (info, settings = {}) => {
@@ -2498,6 +2499,52 @@ async function testSeveralGraphicsCards() {
   await assert.rejects(run.manager.startWithHelpers(model, runtimeConfig, 'key'), /stopped while loading/);
   assert.ok(!run.starts()[0].includes('--spec-type'));
 
+  // RAM. With every layer on this PC's cards, Windows gets the model file read, not memory-mapped
+  // (mapped, a 30 GB model held 30 GB of a 40 GB PC's RAM), and the engine's own prompt cache is
+  // kept to a tenth of the PC's RAM. Both only when the engine's help knows the options.
+  const { promptCacheLimit, buildServerArgs: serverArgs } = require('../electron/lib/modelSettings.cjs');
+  assert.deepEqual([8, 16, 40, 64, 128].map((gb) => promptCacheLimit(gb * 1024)), [1024, 1638, 4096, 6553, 8192]);
+  assert.equal(promptCacheLimit(0), 1024);
+  const fullHelp = `${help}\n-lm,   --load-mode MODE   model loading mode\n-cram, --cache-ram N   set the maximum cache size in MiB`;
+  assert.deepEqual(speculationSupport(fullHelp), { mtp: true, ngram: true, loadMode: true, cacheRam: true });
+  const onWindows = (info, list, settings = {}, platform = 'win32') => {
+    const made = make(info, list, list.length > 1 ? names : ['NVIDIA GeForce RTX 3060']);
+    Object.assign(made.manager, { platform, totalRam: () => 40 * 1024 * MiB, engineHelp: async () => fullHelp });
+    made.manager.store.getEffectiveSettings = () => ({ contextSize: 8192, mtp: 'off', ngram: 'off', ...settings });
+    return made;
+  };
+  // One card that holds the whole model: read, with the cache limit; a failed load is tried again mapped.
+  run = onWindows(layers(20, 200), all.slice(0, 1));
+  await assert.rejects(run.manager.ensureServer(model), /stopped while loading/);
+  starts = run.starts();
+  assert.equal(starts.length, 2, 'read whole, then memory-mapped');
+  assert.ok(after(starts[0], '--load-mode') === 'none' && after(starts[0], '--cache-ram') === '4096', starts[0]);
+  assert.ok(!starts[1].includes('--load-mode') && after(starts[1], '--cache-ram') === '4096', starts[1]);
+  assert.match(run.lines.join('\n'), /the model file is read, not memory-mapped[\s\S]*the load failed with the model file read whole; loading again memory-mapped/);
+  // Shared between several cards with room to spare: read too. Larger than the cards: mapped, as part of it stays in RAM.
+  run = onWindows(layers(40, 480), all);
+  await assert.rejects(run.manager.startWithHelpers(model, runtimeConfig, 'key'), /stopped while loading/);
+  assert.equal(after(run.starts()[0], '--load-mode'), 'none');
+  assert.ok(!run.starts()[1].includes('--load-mode'), 'the fill plan may leave layers in RAM');
+  run = onWindows(layers(80, 1000), all);
+  await assert.rejects(run.manager.startWithHelpers(model, runtimeConfig, 'key'), /stopped while loading/);
+  assert.ok(!run.starts()[0].includes('--load-mode'));
+  // A loading mode chosen by hand stays; so does a cache limit written in the extra arguments.
+  run = onWindows(layers(20, 200), all.slice(0, 1), { loadMode: 'mmap+mlock', extraArgs: '--cache-ram 2048' });
+  await assert.rejects(run.manager.startWithHelpers(model, runtimeConfig, 'key'), /stopped while loading/);
+  assert.equal(after(run.starts()[0], '--load-mode'), 'mmap+mlock');
+  assert.deepEqual(run.starts()[0].split(' ').filter((arg) => arg === '--cache-ram').length, 1);
+  assert.equal(after(run.starts()[0], '--cache-ram'), '2048');
+  // Linux and macOS give a mapped file's pages back by themselves: nothing changes there.
+  run = onWindows(layers(20, 200), all.slice(0, 1), {}, 'linux');
+  await assert.rejects(run.manager.startWithHelpers(model, runtimeConfig, 'key'), /stopped while loading/);
+  assert.ok(!run.starts()[0].includes('--load-mode') && after(run.starts()[0], '--cache-ram') === '4096');
+  // GPU layers set by hand may leave some on the CPU: mapped.
+  run = onWindows(layers(20, 200), all.slice(0, 1), { gpuLayers: 10 });
+  await assert.rejects(run.manager.startWithHelpers(model, runtimeConfig, 'key'), /stopped while loading/);
+  assert.ok(!run.starts()[0].includes('--load-mode'));
+  assert.ok(!serverArgs('m.gguf', {}, 'cuda').includes('--cache-ram') && !serverArgs('m.gguf', {}, 'cuda').includes('--load-mode'), 'nothing is added unless asked for');
+
   // A trial setting of null takes a saved setting away, and nothing of a trial is left afterwards.
   run = make(layers(40, 480), all);
   run.manager.store.getEffectiveSettings = () => ({ contextSize: 8192, gpuLayers: 20 });
@@ -2505,6 +2552,326 @@ async function testSeveralGraphicsCards() {
   run.manager.trialSettings = { gpuLayers: null };
   assert.equal('gpuLayers' in run.manager.settingsFor('big'), false);
   console.log('several graphics cards (readings, what the engine lists, the split and its fallbacks): OK');
+}
+
+/**
+ * "Optimize and benchmark": the plans (what is tried for a model on a PC) and the rules for keeping
+ * a result, then a whole run with a stand-in engine whose speeds are the ones measured on an RTX
+ * 3060 with two Tesla P40.
+ */
+async function testOptimizer() {
+  const { placementSteps, skipStep, threadCounts, fastest, contextTarget, keepContext } = require('../electron/lib/optimizer.cjs');
+  const { chosenCards, cardChoice, localCards } = require('../electron/lib/placement.cjs');
+  const { BenchmarkManager } = require('../electron/lib/benchmark.cjs');
+  const names = ['Tesla P40', 'NVIDIA GeForce RTX 3060', 'Tesla P40'];
+  const cards = localCards(parseDeviceList(['  CUDA0: NVIDIA GeForce RTX 3060 (12288 MiB, 11245 MiB free)', '  CUDA1: Tesla P40 (22937 MiB, 22781 MiB free)', '  CUDA2: Tesla P40 (22937 MiB, 22700 MiB free)'].join('\n')), names).used;
+  const ids = (devices) => devices.map((device) => device.name).join(',');
+
+  // The cards chosen for a model, by name: still the same cards when the engine numbers them
+  // differently. The engine's own names, as 0.2.90 to 0.2.92 saved them, are still understood.
+  assert.equal(ids(chosenCards(cards, 'Tesla P40,Tesla P40')), 'CUDA1,CUDA2');
+  assert.equal(ids(chosenCards(cards, 'Tesla P40')), 'CUDA1', 'one of two alike: the one with more free memory');
+  assert.equal(ids(chosenCards(cards, 'NVIDIA GeForce RTX 3060')), 'CUDA0');
+  assert.equal(ids(chosenCards(cards, 'tesla p40, nvidia geforce rtx 3060')), 'CUDA0,CUDA1', "in the engine's order");
+  assert.equal(ids(chosenCards(cards, 'CUDA1,CUDA2')), 'CUDA1,CUDA2', 'a choice saved by 0.2.92');
+  assert.equal(ids(chosenCards(cards, '')), '');
+  assert.equal(ids(chosenCards(cards, 'Tesla P40,Tesla P40,Tesla P40')), '', 'three wanted, two there: every card is used');
+  assert.equal(ids(chosenCards(cards, 'CUDA7')), '');
+  assert.equal(cardChoice(chosenCards(cards, 'CUDA1,CUDA2')), 'Tesla P40,Tesla P40');
+  const renumbered = localCards(parseDeviceList(['  CUDA0: Tesla P40 (22937 MiB, 22781 MiB free)', '  CUDA1: Tesla P40 (22937 MiB, 22781 MiB free)', '  CUDA2: NVIDIA GeForce RTX 3060 (12288 MiB, 11245 MiB free)'].join('\n')), names).used;
+  assert.equal(ids(chosenCards(renumbered, 'Tesla P40,Tesla P40')), 'CUDA0,CUDA1', 'the same two cards after the engine numbers them anew');
+  assert.equal(ids(chosenCards(renumbered, 'NVIDIA GeForce RTX 3060')), 'CUDA2');
+
+  // What is tried for a 30 GB model that uses all three cards one after the other.
+  const labels = (steps) => steps.map((step) => step.label);
+  let steps = placementSteps({ cards, needMB: 29646, overrides: {}, effective: {} });
+  assert.deepEqual(labels(steps), ['All cards at the same time', '2× Tesla P40, one after the other', '2× Tesla P40 at the same time']);
+  assert.deepEqual(steps[2].changes, { gpuCards: 'Tesla P40,Tesla P40', splitMode: 'tensor' });
+  assert.deepEqual(steps[0].changes, { gpuCards: null, splitMode: 'tensor' });
+  // With the two P40 at the same time already chosen, that is the baseline and is not tried again.
+  steps = placementSteps({ cards, needMB: 29646, overrides: { gpuCards: 'Tesla P40,Tesla P40', splitMode: 'tensor' }, effective: { gpuCards: 'Tesla P40,Tesla P40', splitMode: 'tensor' } });
+  assert.deepEqual(labels(steps), ['All cards, one after the other', 'All cards at the same time', '2× Tesla P40, one after the other']);
+  // A 10 GB model also fits on one card of each kind; GPU layers set by hand are tried on automatic first.
+  steps = placementSteps({ cards, needMB: 10000, overrides: { gpuLayers: 20 }, effective: { gpuLayers: 20 } });
+  assert.deepEqual(labels(steps), ['GPU layers chosen by Uma', 'All cards at the same time', 'RTX 3060 alone', 'Tesla P40 alone', '2× Tesla P40, one after the other', '2× Tesla P40 at the same time']);
+  assert.deepEqual(steps[2].changes, { gpuLayers: null, gpuCards: 'NVIDIA GeForce RTX 3060', splitMode: null });
+  // One card, or helper PCs taking part: no cards to choose between.
+  assert.deepEqual(placementSteps({ cards: cards.slice(0, 1), needMB: 5000 }), []);
+  assert.deepEqual(placementSteps({ cards, needMB: 5000, helpers: true }), []);
+  // When all the cards together were faster at the same time, a group is not tried one after the other.
+  const group = { split: 'layer', devices: 2, all: false };
+  assert.equal(skipStep(group, { layer: 6.6, tensor: 9.0 }), true);
+  assert.equal(skipStep({ ...group, split: 'tensor' }, { layer: 6.6, tensor: 9.0 }), false);
+  assert.equal(skipStep(group, { layer: 6.6 }), false, 'only one way measured: nothing is left out');
+  assert.equal(skipStep({ split: 'layer', devices: 1, all: false }, { layer: 6.6, tensor: 9.0 }), false, 'one card alone is always tried');
+  // Threads only when part of the model runs on the CPU.
+  assert.deepEqual(threadCounts({ logical: 28, now: 28, allOnGpu: true }), []);
+  assert.deepEqual(threadCounts({ logical: 28, now: 28, allOnGpu: false }), [14, 8]);
+  assert.deepEqual(threadCounts({ logical: 8, now: 4, allOnGpu: false }), [8]);
+  // Kept only when clearly faster (3%); a larger context when it loads whole and is no slower.
+  const base = { label: 'now', write: 10 };
+  assert.equal(fastest([{ label: 'a', write: 10.2 }, { label: 'b', write: null }], base), base);
+  assert.equal(fastest([{ label: 'a', write: 10.4 }, { label: 'b', write: 12 }], base).label, 'b');
+  assert.equal(contextTarget({ current: 20480, trained: 262144, fits: () => true }), 65536);
+  assert.equal(contextTarget({ current: 20480, trained: 262144, fits: (size) => size <= 32768 }), 32768);
+  assert.equal(contextTarget({ current: 20480, trained: 32768 }), 32768, 'never past what the model was trained for');
+  assert.equal(contextTarget({ current: 65536, trained: 262144 }), 0, 'never smaller than it is');
+  assert.equal(contextTarget({ current: 8192, trained: 16384 }), 0);
+  assert.equal(keepContext({ write: 9.8, allOnGpu: true }, base), true);
+  assert.equal(keepContext({ write: 9.6, allOnGpu: true }, base), false, 'slower with it');
+  assert.equal(keepContext({ write: 10.5, allOnGpu: false }, base), false, 'layers left the cards');
+  assert.equal(keepContext({ failed: true, write: null }, base), false);
+
+  // A whole run. The stand-in engine answers with the speeds measured on the real cards; what it was
+  // loaded with is read from the trial settings.
+  const speeds = (trial) => {
+    const tensor = trial.splitMode === 'tensor';
+    const pair = trial.gpuCards === 'Tesla P40,Tesla P40';
+    let write = pair ? (tensor ? 24.0 : 12.2) : (tensor ? 15.1 : 12.4);
+    if (trial.mtp === 'off') write = pair && tensor ? 12.6 : write / 2;
+    if (trial.contextSize === 65536) write += 0.3;
+    return write;
+  };
+  const loads = [];
+  let saved = null;
+  const llama = {
+    modelId: '', trialSettings: null, cards: { all: cards }, needMB: 29646, draft: null, speculation: { mtp: true, ngram: true },
+    status: () => ({ running: false, helpers: { servers: [] } }),
+    computeInfo: () => ({ offloadedLayers: 66, totalLayers: 66 }),
+    freeVram: async () => 22781 * 1024 * 1024,
+    async stop() {},
+    async ensureServer() { loads.push({ ...llama.trialSettings }); },
+    async complete({ maxTokens }) {
+      // What the engine is loaded with: the model's settings with the trial on top (null takes one away).
+      const loaded = { ...bench.store.getEffectiveSettings() };
+      for (const [key, value] of Object.entries(llama.trialSettings || {})) { if (value === null) delete loaded[key]; else loaded[key] = value; }
+      const write = speeds(loaded);
+      return maxTokens === 1 ? { timings: { prompt_n: 1300, prompt_per_second: 256 } } : { timings: { predicted_n: maxTokens, predicted_per_second: write } };
+    },
+  };
+  const info = { nLayer: 65, nEmbd: 5120, nHead: 24, nHeadKv: 4, keyLength: 256, valueLength: 256, attentionLayers: 17, contextLength: 262144, layerBytes: Array.from({ length: 65 }, () => 440 * 1024 * 1024), inputBytes: 300 * 1024 * 1024, otherBytes: 300 * 1024 * 1024, totalBytes: 29200 * 1024 * 1024 };
+  const before = { threads: 28, ubatchSize: 1024, contextSize: 20480 };
+  const bench = new BenchmarkManager({
+    store: { getSettings: () => ({ modelOverrides: { big: before } }), getEffectiveSettings: () => ({ contextSize: 8192, ...before }), setModelOverrides: async (_id, next) => { saved = next; }, getBenchmarks: () => [] },
+    models: { resolveActive: async () => ({ id: 'big', name: 'Big 27B' }), modelInfo: async () => info },
+    runtime: { status: async () => ({ installed: true }) },
+    llama,
+    agent: () => false,
+  });
+  bench.execute = async ({ optimization }) => ({ optimization });
+  let result = await bench.optimize({ signal: new AbortController().signal });
+  assert.deepEqual(result.optimization.tried.map((entry) => `${entry.label}: ${entry.failed ? 'failed' : entry.write}${entry.kept ? ' kept' : ''}`), [
+    'Current settings: 12.4',
+    'All cards at the same time: 15.1',
+    '2× Tesla P40 at the same time: 24 kept',
+    'Without guessing ahead: 12.6',
+    'Context of 65,536 tokens: 24.3 kept',
+  ], 'the group is not tried one after the other, and threads are not tried with every layer on the cards');
+  assert.deepEqual(result.optimization.kept, ['2× Tesla P40 at the same time', 'Context of 65,536 tokens']);
+  assert.equal(result.optimization.tried[0].read, 256);
+  assert.deepEqual(saved, { threads: 28, ubatchSize: 1024, contextSize: 65536, gpuCards: 'Tesla P40,Tesla P40', splitMode: 'tensor' }, 'what the model had is kept, with what was faster on top');
+  assert.equal(llama.trialSettings, null, 'nothing of a trial is left in the engine');
+  assert.ok(loads.every((trial) => trial.batchTuning === 'off' && trial.ubatchSize === 1024), 'the same batch size for every step');
+  // Run again with what it saved: nothing is faster, and nothing is saved.
+  saved = null;
+  const after = { threads: 28, ubatchSize: 1024, contextSize: 65536, gpuCards: 'Tesla P40,Tesla P40', splitMode: 'tensor' };
+  bench.store.getSettings = () => ({ modelOverrides: { big: after } });
+  bench.store.getEffectiveSettings = () => ({ ...after });
+  result = await bench.optimize({ signal: new AbortController().signal });
+  assert.equal(result.optimization.changed, false);
+  assert.deepEqual(result.optimization.kept, []);
+  assert.equal(saved, null);
+  // Cancelled half way: nothing is saved, and the trial is taken out of the engine.
+  const stopper = new AbortController();
+  llama.ensureServer = async () => { if (llama.trialSettings?.gpuCards === null) stopper.abort(); };
+  bench.store.getSettings = () => ({ modelOverrides: { big: after } });
+  await assert.rejects(bench.optimize({ signal: stopper.signal }), (err) => err.name === 'AbortError');
+  assert.equal(saved, null);
+  assert.equal(llama.trialSettings, null);
+  console.log('optimize and benchmark (cards by name, the plans, what is kept, a whole run, a second run, a cancelled one): OK');
+}
+
+/**
+ * Small things a PC with several cards and a chat that builds programs need: a card in a narrow
+ * slot, a draft model that was removed, a program started by its bare name.
+ */
+async function testLooseEnds() {
+  const { parseNvidiaCards } = require('../electron/lib/hardware.cjs');
+  const { gpuReading } = require('../electron/lib/systemStats.cjs');
+  const { fixStartProcess } = require('../electron/lib/tools.cjs');
+  // PCIe lanes: only a card in a slot with fewer lanes than it can use is marked.
+  const smi = ['Tesla P40, 23040, 22900, 9, 0, 4, 16', 'NVIDIA GeForce RTX 3060, 12288, 11800, 400, 3, 16, 16', 'Tesla P40, 23040, 22900, 9, 0, [N/A], [N/A]', ''].join('\r\n');
+  const cards = parseNvidiaCards(smi);
+  assert.deepEqual(cards.map((card) => [card.lanes, card.lanesMax]), [[4, 16], [16, 16], [0, 0]]);
+  assert.deepEqual(gpuReading(cards).cards.map((card) => card.lanes || 0), [4, 0, 0]);
+  assert.equal(gpuReading(cards).cards[0].lanesMax, 16);
+  assert.equal(parseNvidiaCards('Tesla P40, 24576, 24210, 366, 0')[0].lanes, 0, 'an answer without the lanes still reads');
+  // An nvidia-smi that does not know the two lane fields answers with an error and no cards: the
+  // plain question is asked instead, and from then on only that one. (A fresh copy of the module,
+  // so what it learns here does not stay with the other tests.)
+  const hardwarePath = require.resolve('../electron/lib/hardware.cjs');
+  const keptModule = require.cache[hardwarePath];
+  delete require.cache[hardwarePath];
+  const fresh = require('../electron/lib/hardware.cjs');
+  require.cache[hardwarePath] = keptModule;
+  if (process.platform !== 'darwin') {
+    const asked = [];
+    const oldSmi = async (_file, args) => { asked.push(args[0].includes('pcie') ? 'lanes' : 'plain'); return args[0].includes('pcie') ? '' : 'NVIDIA GeForce GTX 1060, 6144, 5900, 244, 7'; };
+    assert.equal((await fresh.nvidiaCards(1000, oldSmi))[0].name, 'NVIDIA GeForce GTX 1060');
+    assert.equal((await fresh.nvidiaCards(1000, oldSmi)).length, 1);
+    assert.deepEqual(asked, ['lanes', 'plain', 'plain'], 'the lanes are asked for once');
+  }
+
+  // A draft model that was removed leaves the settings of the model it drafted for.
+  const dir = path.join(root, 'loose-ends');
+  await fsp.rm(dir, { recursive: true, force: true });
+  const store = new Store(path.join(dir, 'data'));
+  await store.init();
+  await store.setModelOverrides('big', { threads: 28, draftModelId: 'small', draftTokens: 8 });
+  await store.setModelOverrides('other', { draftModelId: 'gone' });
+  await store.setModelOverrides('third', { contextSize: 4096 });
+  assert.equal(await store.forgetMissingDrafts(new Set(['big', 'small', 'other', 'third'])), 1);
+  assert.deepEqual(store.getSettings().modelOverrides, { big: { threads: 28, draftModelId: 'small', draftTokens: 8 }, third: { contextSize: 4096 } }, 'a model whose only setting was the lost draft has none left');
+  assert.equal(await store.forgetMissingDrafts(new Set(['big', 'third'])), 1);
+  assert.deepEqual(store.getSettings().modelOverrides.big, { threads: 28 });
+  assert.equal(await store.forgetMissingDrafts(new Set(['big', 'third'])), 0);
+
+  // Start-Process: a program in the folder goes by its full path (Windows would start its own
+  // taskmgr.exe), and the older fixes still hold.
+  const folder = 'C:\\work\\my app';
+  const there = (file) => file === `${folder}\\taskmgr.exe` || file === `${folder}\\run.bat`;
+  assert.equal(fixStartProcess('Start-Process taskmgr.exe', folder, there), `Start-Process "${folder}\\taskmgr.exe"`);
+  assert.equal(fixStartProcess('Start-Process "taskmgr.exe" -Wait', folder, there), `Start-Process "${folder}\\taskmgr.exe" -Wait`);
+  assert.equal(fixStartProcess('Start-Process -FilePath run.bat', folder, there), `Start-Process -FilePath "${folder}\\run.bat"`);
+  assert.equal(fixStartProcess('Start-Process notepad.exe', folder, there), 'Start-Process notepad.exe', 'not in the folder: Windows finds it');
+  assert.equal(fixStartProcess('Start-Process .\\taskmgr.exe', folder, there), 'Start-Process .\\taskmgr.exe');
+  assert.equal(fixStartProcess('Start-Process chrome --args https://example.com', folder, there), 'Start-Process chrome -ArgumentList https://example.com');
+  assert.equal(fixStartProcess('Start-Process "C:\\Program Files\\Google\\Brave\\brave.exe"', folder, () => false), 'Start-Process brave');
+  assert.equal(fixStartProcess('Get-Process taskmgr.exe', folder, there), 'Get-Process taskmgr.exe');
+  // A program of the folder called by its bare name gets the ".\" PowerShell wants (a real model
+  // ran "hello.exe" right after compiling it, and the command failed).
+  const { fixLocalProgram } = require('../electron/lib/tools.cjs');
+  assert.equal(fixLocalProgram('taskmgr.exe', folder, there), '.\\taskmgr.exe');
+  assert.equal(fixLocalProgram('run.bat --fast "a b"', folder, there), '.\\run.bat --fast "a b"');
+  assert.equal(fixLocalProgram('notepad.exe notes.txt', folder, there), 'notepad.exe notes.txt', 'not in the folder: left to Windows');
+  assert.equal(fixLocalProgram('.\\taskmgr.exe', folder, there), '.\\taskmgr.exe');
+  assert.equal(fixLocalProgram('node taskmgr.exe', folder, there), 'node taskmgr.exe', 'only the program that is called');
+  console.log('a card in a narrow slot, a removed draft model, a program started by its bare name: OK');
+}
+
+/**
+ * Getting ready while the user types: the engine reads Uma's instructions before the first message,
+ * the very ones that message is then sent with, and never over what a chat left in the engine.
+ */
+async function testWarmAhead() {
+  const { LlamaManager } = require('../electron/lib/llama.cjs');
+  const dir = path.join(root, 'warm');
+  await fsp.rm(dir, { recursive: true, force: true });
+  const store = new Store(path.join(dir, 'data'));
+  await store.init();
+  const workspaceDir = path.join(dir, 'workspace');
+  await ensureDir(workspaceDir);
+  await fsp.writeFile(path.join(workspaceDir, 'notes.txt'), 'hello\n');
+  const workspace = new Workspace({ root: workspaceDir, trash: () => {} });
+  await workspace.init();
+  const conversations = new ConversationStore(path.join(dir, 'conversations'));
+  await conversations.init();
+  const make = ({ fresh = true, remembered = false } = {}) => {
+    const seen = { warmed: [], calls: [], loads: 0 };
+    let done;
+    const finished = new Promise((resolve) => { done = resolve; });
+    const agent = new AgentRunner({
+      store, workspace, conversations,
+      models: { resolveActive: async () => ({ id: 'mock', name: 'Mock', family: 'Test' }) },
+      toolRunner: new ToolRunner({ workspace, store, onChanged: () => {} }),
+      llama: {
+        generation: 1,
+        async ensureServer() { seen.loads += 1; },
+        canWarm: () => fresh,
+        hasMemoryOf: async () => remembered,
+        warm: async (messages) => { seen.warmed.push(messages); return true; },
+        async *streamChat(request) { seen.calls.push(request); yield { type: 'text', text: 'Hello.' }; yield { type: 'finish', reason: 'stop' }; },
+      },
+      send: (_channel, payload) => { if (payload?.type === 'assistant-end') done(payload.message); },
+    });
+    return { agent, seen, finished };
+  };
+  // A new chat: what is read ahead is word for word the instructions the first message goes out with.
+  let chat = make();
+  const conversation = await conversations.create();
+  assert.equal(await chat.agent.warm(conversation.id), true);
+  assert.equal(chat.seen.loads, 1, 'the model is loaded if it was asleep');
+  assert.deepEqual(chat.seen.warmed[0].map((message) => message.role), ['system', 'user']);
+  await chat.agent.send(conversation.id, 'hello there');
+  await chat.finished;
+  assert.equal(chat.seen.calls[0].messages[0].content, chat.seen.warmed[0][0].content, 'the same instructions, so the engine reuses what it read');
+  assert.ok(chat.seen.warmed[0][0].content.length > 1500);
+  // With no chat open yet, the instructions of a new chat are read.
+  chat = make();
+  assert.equal(await chat.agent.warm(null), true);
+  const fresh = await conversations.create();
+  await chat.agent.send(fresh.id, 'hi');
+  await chat.finished;
+  assert.equal(chat.seen.calls[0].messages[0].content, chat.seen.warmed[0][0].content);
+  // An engine that has read something, or a chat whose memory is on disk: nothing is read ahead.
+  chat = make({ fresh: false });
+  assert.equal(await chat.agent.warm(conversation.id), false);
+  assert.equal(chat.seen.warmed.length, 0);
+  chat = make({ remembered: true });
+  assert.equal(await chat.agent.warm(conversation.id), false);
+  assert.equal(chat.seen.warmed.length, 0);
+  // While a reply is being written, nothing is read ahead either.
+  chat = make();
+  chat.agent.current = { conversationId: conversation.id, controller: new AbortController() };
+  assert.equal(await chat.agent.warm(conversation.id), false);
+  assert.equal(chat.seen.loads, 0);
+
+  // The engine's side, with a stand-in engine that answers slowly: one reading per load, a message
+  // sent meanwhile waits for it, and an engine that holds a chat is left alone.
+  const order = [];
+  const engine = http.createServer((request, response) => {
+    let body = '';
+    request.on('data', (chunk) => { body += chunk; });
+    request.on('end', () => {
+      const sent = JSON.parse(body);
+      const warming = sent.max_tokens === 1 && sent.stream === false && sent.cache_prompt === true;
+      order.push(warming ? 'warm:start' : 'chat:start');
+      setTimeout(() => {
+        order.push(warming ? 'warm:end' : 'chat:end');
+        response.setHeader('Content-Type', 'application/json');
+        response.end(JSON.stringify({ choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }], timings: { prompt_n: 3701, predicted_n: 1 } }));
+      }, warming ? 250 : 10);
+    });
+  });
+  await new Promise((resolve) => engine.listen(0, '127.0.0.1', resolve));
+  try {
+    const manager = new LlamaManager({ store: { getRuntime: () => ({}), getEffectiveSettings: () => ({}), getSettings: () => ({}) }, runtime: {}, logsDir: dir, modelInfo: async () => null });
+    const lines = [];
+    manager.log = (line) => lines.push(line);
+    Object.assign(manager, { state: 'ready', port: engine.address().port, apiKey: 'k', generation: 3, idleMinutes: 0 });
+    const messages = [{ role: 'system', content: 'instructions' }, { role: 'user', content: '.' }];
+    assert.equal(manager.canWarm(), true);
+    const warming = manager.warm(messages);
+    assert.equal(manager.canWarm(), false, 'not twice at once');
+    const reply = manager.complete({ messages: [{ role: 'user', content: 'hi' }] });
+    assert.equal(await warming, true);
+    await reply;
+    assert.deepEqual(order, ['warm:start', 'warm:end', 'chat:start', 'chat:end'], 'the message waited for the reading to end');
+    assert.match(lines.join('\n'), /read the instructions ahead of the first message: 3701 tokens/);
+    assert.equal(await manager.warm(messages), false, 'once per load');
+    manager.generation = 4;
+    manager.promptCache = { key: 'k', owner: 'c_1', dirty: false };
+    assert.equal(manager.canWarm(), false, 'the engine holds a chat');
+    manager.promptCache = { key: 'k', owner: null, dirty: false };
+    assert.equal(manager.canWarm(), true, 'a new load that holds no chat');
+    manager.state = 'stopped';
+    assert.equal(await manager.warm(messages), false);
+    clearTimeout(manager.idleTimer);
+    clearTimeout(manager.promptSaveTimer);
+  } finally {
+    await new Promise((resolve) => engine.close(resolve));
+  }
+  console.log('getting ready while the user types (the same instructions, never over a chat, one reading per load): OK');
 }
 
 /**
@@ -2548,12 +2915,19 @@ function testWorkChat() {
   assert.equal(compilerCall('& "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\MSBuild\\Current\\Bin\\MSBuild.exe" a.vcxproj'), '');
   assert.equal(compilerCall('clang main.c'), '');
   assert.equal(compilerCall('Get-ChildItem cl.exe'), '');
+  // A second command after the compiler stays in PowerShell and runs when the compiler built.
+  const { splitAfterCompiler } = require('../electron/lib/tools.cjs');
+  assert.deepEqual(splitAfterCompiler('cl hello.cpp /Fe:hello.exe; .\\hello.exe'), { compile: 'cl hello.cpp /Fe:hello.exe', rest: '.\\hello.exe' });
+  assert.deepEqual(splitAfterCompiler('cl hello.cpp /Fe:hello.exe && .\\hello.exe'), { compile: 'cl hello.cpp /Fe:hello.exe', rest: '.\\hello.exe' });
+  assert.deepEqual(splitAfterCompiler('cl /D "NAME=a;b" hello.cpp'), { compile: 'cl /D "NAME=a;b" hello.cpp', rest: '' }, 'a ; inside quotes belongs to the compiler');
+  assert.deepEqual(splitAfterCompiler(''), { compile: '', rest: '' });
   // What a window shows, quoted, after only the small picture: a real model read "65031 MB" off a 40 GB PC.
   const { QUOTES_SCREEN_RE } = require('../electron/lib/agentChecks.cjs');
   assert.match('The XP-style Task Manager is built and running. You can see it in the top-left of the screen — it shows a list of processes, plus a memory bar at the bottom showing "28471 MB / 65031 MB (27%)".', QUOTES_SCREEN_RE);
   assert.match('The title bar reads “Task Manager”.', QUOTES_SCREEN_RE);
   assert.doesNotMatch('The program is built. Start xpTaskMgr.exe from the folder to see it.', QUOTES_SCREEN_RE);
   assert.doesNotMatch('You can see the full code in taskmgr.cpp.', QUOTES_SCREEN_RE);
+  assert.doesNotMatch('The build output shows "0 errors, 0 warnings".', QUOTES_SCREEN_RE, 'what a command printed is not the screen');
   console.log('a chat that built a program stays about it (wants, typos, questions, continue, commands pasted in chat, compiler calls, quoted screens): OK');
 }
 
@@ -2748,6 +3122,9 @@ async function main() {
   await testDocuments();
   await testSeeing();
   await testSeveralGraphicsCards();
+  await testOptimizer();
+  await testLooseEnds();
+  await testWarmAhead();
   testWorkChat();
   testPromptSize();
   testMainRamFirst();

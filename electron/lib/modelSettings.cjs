@@ -128,8 +128,25 @@ function defaultThreads() {
   return Math.max(2, Math.min(12, Math.floor(os.cpus().length / 2)));
 }
 
+/**
+ * The most RAM the engine's own prompt cache may take on a PC with `totalRamMB` of RAM, in MiB: a
+ * tenth of it, and between 1 and 8 GB. llama.cpp keeps what it read of earlier prompts in RAM, up
+ * to 8 GB whatever the PC has. Uma keeps every chat on disk itself, so that cache seldom finds
+ * anything (20 times in 266 on one user's PC), while on a PC with 40 GB it grew to 8 GB beside a
+ * 30 GB model, Windows began to page, and one update of the cache took 27 s.
+ */
+function promptCacheLimit(totalRamMB) {
+  return Math.max(1024, Math.min(8192, Math.floor((Number(totalRamMB) || 0) / 10)));
+}
+
 /** Everything about how the server runs, except the port and key that change each start. */
-function buildServerArgs(modelPath, settings, backend, { allLayers = false, mmproj = '', placement = null, extraFitMB = 0, moeCache = null } = {}) {
+/**
+ * `readWhole` and `promptCacheMB` are Uma's own choices for this load (see LlamaManager.startServer):
+ * the model file read instead of memory-mapped, and a limit for the engine's prompt cache in RAM
+ * (0 leaves the engine's own). A loading mode set by hand, or a --cache-ram written in the extra
+ * arguments, comes first.
+ */
+function buildServerArgs(modelPath, settings, backend, { allLayers = false, mmproj = '', placement = null, extraFitMB = 0, moeCache = null, readWhole = false, promptCacheMB = 0 } = {}) {
   const s = { ...DEFAULTS, ...settings };
   // A placement plan means helper PCs take layers, even when this PC itself runs on the CPU.
   const offload = settings.gpuOffload !== false && (backend !== 'cpu' || placement);
@@ -157,10 +174,13 @@ function buildServerArgs(modelPath, settings, backend, { allLayers = false, mmpr
   if (s.threadsBatch) args.push('-tb', String(s.threadsBatch));
   if (s.kvUnified) args.push('--kv-unified');
   if (s.loadMode !== 'auto') args.push('--load-mode', s.loadMode);
+  else if (readWhole) args.push('--load-mode', 'none');
   if (s.splitMode !== 'auto' && offload) args.push('--split-mode', s.splitMode);
   if (s.reasoningBudget >= 0) args.push('--reasoning-budget', String(s.reasoningBudget));
   if (s.reasoningBudgetMessage) args.push('--reasoning-budget-message', s.reasoningBudgetMessage);
-  args.push(...parseExtraArgs(s.extraArgs));
+  const extra = parseExtraArgs(s.extraArgs);
+  if (promptCacheMB > 0 && !extra.some((arg) => /^(?:-cram|--cache-ram)(?:=|$)/.test(arg))) args.push('--cache-ram', String(Math.round(promptCacheMB)));
+  args.push(...extra);
   return args;
 }
 
@@ -248,10 +268,19 @@ function speculationArgs({ mtp = false, ngram = false } = {}) {
   return types.length ? ['--spec-type', types.join(',')] : [];
 }
 
-/** Which of those the installed engine knows, from its own --help text. */
+/**
+ * Which of those the installed engine knows, from its own --help text, and two other options Uma
+ * uses only when they are there: the loading mode, and the size of the engine's own prompt cache.
+ */
 function speculationSupport(helpText) {
-  const types = String(helpText || '').match(/--spec-type\s+([\w,-]+)/)?.[1].split(',') || [];
-  return { mtp: types.includes('draft-mtp'), ngram: types.includes('ngram-mod') };
+  const help = String(helpText || '');
+  const types = help.match(/--spec-type\s+([\w,-]+)/)?.[1].split(',') || [];
+  return {
+    mtp: types.includes('draft-mtp'),
+    ngram: types.includes('ngram-mod'),
+    loadMode: /--load-mode\b/.test(help),
+    cacheRam: /--cache-ram\b/.test(help),
+  };
 }
 
 // Draft models known to work for a tokenizer, offered when none is installed. Checked against
@@ -272,5 +301,5 @@ function moeCacheShare(loadMode = 'auto') {
 
 module.exports = { moeCacheShare,
   FIELDS, DEFAULTS, CACHE_TYPES, sanitizeModelSettings, buildServerArgs, parseExtraArgs, defaultThreads, cacheTypeFixes,
-  draftCompatibility, draftArgs, SUGGESTED_DRAFTS, speculationArgs, speculationSupport,
+  draftCompatibility, draftArgs, SUGGESTED_DRAFTS, speculationArgs, speculationSupport, promptCacheLimit,
 };

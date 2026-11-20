@@ -20,7 +20,10 @@ function cpuTimes() {
  */
 function gpuReading(cards) {
   if (!cards.length) return null;
-  const each = cards.map((card) => ({ name: card.name, percent: card.percent, usedBytes: card.usedMB * 1024 ** 2, totalBytes: card.totalMB * 1024 ** 2 }));
+  const each = cards.map((card) => ({
+    name: card.name, percent: card.percent, usedBytes: card.usedMB * 1024 ** 2, totalBytes: card.totalMB * 1024 ** 2,
+    ...(card.lanes > 0 && card.lanesMax > card.lanes ? { lanes: card.lanes, lanesMax: card.lanesMax } : {}),
+  }));
   return {
     percent: Math.max(...each.map((card) => card.percent)),
     usedBytes: each.reduce((sum, card) => sum + card.usedBytes, 0),

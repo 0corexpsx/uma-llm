@@ -89,6 +89,14 @@ const filesIn = async (dir) => (await fsp.readdir(dir, { recursive: true })).map
 const ran = (tools, name) => tools.some((block) => block.name === name && block.status !== 'error');
 const passes = (dir) => spawnSync(process.execPath, ['test.js'], { cwd: dir, encoding: 'utf8', env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } }).status === 0;
 const nodeVersion = () => { try { return execFileSync('node', ['--version'], { encoding: 'utf8' }).trim().replace(/^v/, ''); } catch { return ''; } };
+/** Whether Visual Studio's C++ tools are on this PC (Microsoft's locator knows). */
+const hasMsvc = () => {
+  if (process.platform !== 'win32') return false;
+  try {
+    const vswhere = path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Microsoft Visual Studio', 'Installer', 'vswhere.exe');
+    return Boolean(execFileSync(vswhere, ['-latest', '-products', '*', '-find', 'VC\\Auxiliary\\Build\\vcvars64.bat'], { encoding: 'utf8' }).trim());
+  } catch { return false; }
+};
 // llama.cpp tags its builds b12345 (pre-releases) and its releases v1.0.0: either is a tag the model read.
 const RELEASE_TAG = /\bb\d{4,5}\b|\bv\d+\.\d+\.\d+\b/;
 const saysOff =(reply, what) => what.test(reply) && /\boff\b|disabled|not (?:enabled|available|allowed)|enable|turn(?:ed)? on|settings|disattivat|spent|attiva|impostazioni/i.test(reply);
@@ -127,6 +135,33 @@ const TASKS = [
   // Small talk uses no tool.
   { id: 'chat-it', ask: 'raccontami una barzelletta', ok: async (dir, reply, tools) => (await untouched(dir)) && reply.length > 20 && !tools.length },
 
+  // A chat that made something stays about it (a user's chat of 2026-11-19). What is wanted next
+  // is said without a verb Uma knows: it must still be done with the tools, not pasted into the
+  // chat. And a question about what was made is answered after a look, with a file that is there.
+  {
+    id: 'follow-en',
+    ask: 'make a web page hello.html with a title and a button that shows a greeting',
+    then: ['i want a dark version like the old windows command prompt', 'where is the page?'],
+    ok: async (dir, reply, tools, state, replies, turns) => {
+      const pages = (await filesIn(dir)).filter((name) => /\.html?$/.test(name));
+      const texts = await Promise.all(pages.map((name) => read(dir, name)));
+      const dark = texts.some((text) => /background(?:-color)?\s*:\s*(?:#[0-3]|black|rgba?\(\s*[0-5]?\d\s*,)|color-scheme\s*:\s*dark/i.test(text));
+      const wrote = turns[1]?.tools.some((block) => ['write_file', 'replace_in_file', 'append_file'].includes(block.name) && block.status !== 'error');
+      const pasted = /```[^\n]*\n(?:[^\n]*\n){14}/.test(replies[1] || '');
+      const looked = turns[2]?.tools.some((block) => ['list_files', 'read_file', 'file_info', 'search_files'].includes(block.name));
+      const named = pages.some((name) => (replies[2] || '').includes(name.split('/').pop()));
+      return Boolean(dark && wrote && !pasted && looked && named);
+    },
+  },
+
+  // Getting ready while the user types (AgentRunner.warm): the engine reads Uma's instructions
+  // before the message is sent, and the first reply then reads little more than the message.
+  {
+    id: 'warm-en', warm: true,
+    ask: 'what does calc.js export?',
+    ok: async (dir, reply, tools, state, replies, turns, calls) => calls[0]?.read > 0 && calls[0].read < 400 && /add|multiply/i.test(reply),
+  },
+
   // Terminal on: commands run for real, in the throwaway folder, with no question asked.
   // The answer is the version this PC really has, not one the model remembers.
   { id: 'cmd-en', group: 'terminal', on: ['terminal'], ask: 'which version of node is installed on this PC?', ok: async (dir, reply) => Boolean(nodeVersion()) && reply.includes(nodeVersion()) },
@@ -146,6 +181,15 @@ const TASKS = [
     ask: 'make this folder a git repository and commit calc.js with the message "first commit"',
     // The folder's own repository, not one around it.
     ok: async (dir) => fs.existsSync(path.join(dir, '.git')) && /first commit/i.test(spawnSync('git', ['log', '--oneline'], { cwd: dir, encoding: 'utf8' }).stdout || ''),
+  },
+  // Microsoft's C++ compiler from a PowerShell terminal: it only works inside Visual Studio's own
+  // environment, which Uma sets up for it (tools.cjs, compilerCall). Before that a real model
+  // needed five failed commands to get to an .exe. Only on a PC with Visual Studio's C++ tools.
+  {
+    id: 'cpp-en', group: 'terminal', on: ['terminal'], needs: 'msvc',
+    ask: 'make a small C++ console program hello.cpp that prints "hello from uma", compile it to hello.exe, run it and tell me what it prints',
+    ok: async (dir, reply, tools) => (await filesIn(dir)).includes('hello.exe') && /hello from uma/i.test(reply)
+      && tools.filter((block) => block.name === 'run_command' && block.status === 'error').length <= 2,
   },
   // Terminal off: it says so, and does not report a result it never saw. Terminal on: it runs the
   // file and reports the failure. Either way it was asked what the file prints, not to change it.
@@ -353,7 +397,19 @@ async function runVersion({ label, dir }, model, runtime) {
   await store.setRuntime(runtime);
   // The settings Uma starts with: file edits only. English, so that Uma's own notes are not translated.
   await store.updateSettings({ contextSize, allowEdits: true, allowShell: false, allowDelete: false, allowInternet: false, language: 'en' });
-  const llama = new LlamaManager({ store, runtime: { hardware: {} }, logsDir: path.join(data, 'logs') });
+  // The engine as the app starts it on this PC: its graphics cards, the model's own details (a
+  // model that can guess ahead then does), and the speed settings the app has saved for this model.
+  // Without them a PC with several cards ran the tasks at half the speed the app has.
+  const hardware = await Promise.resolve(lib('hardware.cjs').detectHardware?.()).catch(() => null);
+  const info = await (async () => {
+    const { readModelInfo, fileSource } = lib('gguf.cjs');
+    const parts = model.parts?.length ? model.parts : [{ path: model.path, size: model.size }];
+    return { ...(await readModelInfo(parts.map((part) => ({ source: fileSource(part.path), size: part.size })))), mmprojBytes: model.mmproj?.size || 0 };
+  })().catch(() => null);
+  const saved = JSON.parse(await fsp.readFile(path.join(appData, 'settings.json'), 'utf8').catch(() => '{}')).modelOverrides?.[model.id] || {};
+  const speed = Object.fromEntries(['gpuCards', 'splitMode', 'threads', 'gpuLayers', 'mtp', 'ngram'].filter((key) => saved[key] !== undefined).map((key) => [key, saved[key]]));
+  if (Object.keys(speed).length) await store.setModelOverrides(model.id, speed);
+  const llama = new LlamaManager({ store, runtime: { hardware: hardware || {} }, logsDir: path.join(data, 'logs'), ...(info ? { modelInfo: async () => info } : {}) });
   const conversations = new ConversationStore(path.join(data, 'conversations'));
   await conversations.init();
   const skills = new SkillStore({ globalDir: path.join(data, 'skills'), bundledDir: path.join(dir, 'electron', 'skills'), store, library: libraryDir ? new SkillLibrary({ dir: libraryDir }) : null });
@@ -370,6 +426,7 @@ async function runVersion({ label, dir }, model, runtime) {
     const chosen = TASKS.filter((item) => (!only.length || only.includes(item.id) || only.includes(item.group || 'files'))
       && (item.needs !== 'screen' || (asApp && model.mmproj))
       && (item.needs !== 'app' || asApp)
+      && (item.needs !== 'msvc' || hasMsvc())
       && (item.needs !== 'input' || (asApp && model.mmproj && argv.includes('--input'))));
     if (TASKS.some((item) => item.needs === 'screen' && only.includes(item.group)) && !(asApp && model.mmproj)) console.log(asApp ? 'This model has no vision file: the tasks about seeing are left out.' : 'The tasks about seeing need --screen.');
     for (const task of ask ? [{ id: 'ask', ask, ok: async () => true }] : chosen) {
@@ -440,6 +497,12 @@ async function runVersion({ label, dir }, model, runtime) {
           models: { resolveActive: async () => model },
           send: (_channel, payload) => { if (payload?.type === 'assistant-end') done(payload.message); },
         });
+        // As when the user starts to type: the instructions are read ahead (not counted in the task's time).
+        if (task.warm) {
+          const warmStart = Date.now();
+          const warmed = await agent.warm?.(conversation.id);
+          console.log(`     read ahead: ${warmed ? `yes, in ${((Date.now() - warmStart) / 1000).toFixed(1)} s` : 'no'}`);
+        }
         const started = Date.now();
         let timer;
         await agent.send(conversation.id, typeof task.ask === 'function' ? task.ask(workspaceDir) : task.ask);
@@ -451,12 +514,16 @@ async function runVersion({ label, dir }, model, runtime) {
         clearTimeout(timer);
         // Messages that follow in the same chat (task.then), each answered before the next.
         const replyOf = (item) => (item?.blocks || []).filter((block) => block.type === 'text' && !block.unchecked).map((block) => block.text).join('\n');
+        const toolsOf = (item) => (item?.blocks || []).filter((block) => block.type === 'tool');
         const replies = [replyOf(message)];
+        // Every message of the chat with what was done for it, for the tasks that have several.
+        const turns = [{ reply: replies[0], tools: toolsOf(message) }];
         for (const next of message ? task.then || [] : []) {
           finished = new Promise((resolve) => { done = resolve; });
           await agent.send(conversation.id, next);
-          message = await Promise.race([finished, new Promise((resolve) => { setTimeout(() => { agent.stop(conversation.id); resolve(null); }, 180000); })]);
+          message = await Promise.race([finished, new Promise((resolve) => { setTimeout(() => { agent.stop(conversation.id); resolve(null); }, 300000); })]);
           replies.push(replyOf(message));
+          turns.push({ reply: replies.at(-1), tools: toolsOf(message) });
           if (trace) console.log(`     then "${next.slice(0, 50)}": ${replies.at(-1).replace(/\s+/g, ' ').slice(0, 160)}`);
         }
         // What the test window saw, then the window goes and the pointer returns to where it was.
@@ -476,14 +543,16 @@ async function runVersion({ label, dir }, model, runtime) {
         const result = {
           id: task.id,
           sample,
-          ok: message ? Boolean(await task.ok(workspaceDir, reply, tools, windowState, replies).catch(() => false)) : false,
+          ok: message ? Boolean(await task.ok(workspaceDir, reply, tools, windowState, replies, turns, calls).catch(() => false)) : false,
           timedOut: !message,
           seconds: Math.round((Date.now() - started) / 1000),
           replies: calls.length,
           promptTokens: Math.max(0, ...calls.map((call) => call.prompt)) && calls.find((call) => call.prompt)?.prompt,
           writtenTokens: calls.reduce((sum, call) => sum + call.written, 0),
           skills: tools.filter((block) => block.name === 'load_skill').map((block) => block.args?.name),
-          tools: tools.map((block) => `${block.name}${block.status === 'error' ? '!' : ''}`),
+          tools: turns.length > 1
+            ? turns.map((turn, index) => `${index + 1}: ${turn.tools.map((block) => `${block.name}${block.status === 'error' ? '!' : ''}`).join(' ') || '-'}`)
+            : tools.map((block) => `${block.name}${block.status === 'error' ? '!' : ''}`),
           setAside: (message?.blocks || []).map((block) => block.unchecked).filter(Boolean),
           files: await Promise.all((await filesIn(workspaceDir)).map(async (name) => `${name} (${(await read(workspaceDir, name)).length})`)),
           reply: reply.replace(/\s+/g, ' ').slice(0, 300),

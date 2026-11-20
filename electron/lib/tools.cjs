@@ -238,6 +238,56 @@ function compilerCall(command) {
   return byPath ? `cl ${byPath[1]}` : '';
 }
 
+/**
+ * A compiler call followed by another command ("cl hello.cpp /Fe:hello.exe; .\hello.exe"): the
+ * compiler's part, which goes into Visual Studio's environment, and the rest, which stays in
+ * PowerShell and runs when the compiler succeeded. Split at the first ; or && outside quotes.
+ */
+function splitAfterCompiler(compile) {
+  let quote = '';
+  for (let index = 0; index < compile.length; index += 1) {
+    const char = compile[index];
+    if (quote) { if (char === quote) quote = ''; continue; }
+    if (char === '"' || char === "'") { quote = char; continue; }
+    const two = compile.slice(index, index + 2);
+    if (char === ';' || two === '&&') {
+      return { compile: compile.slice(0, index).trim(), rest: compile.slice(index + (char === ';' ? 1 : 2)).trim() };
+    }
+  }
+  return { compile, rest: '' };
+}
+
+/**
+ * Common mistakes when starting a program with Start-Process on Windows, fixed before they fail or
+ * start the wrong thing. Returns the command to run (the same one when nothing needs fixing).
+ * - "--args" is not a PowerShell parameter: it is -ArgumentList.
+ * - A browser's guessed path that does not exist ("C:\Program Files\Google\Brave\Brave.exe") is
+ *   started by its name, which Windows knows.
+ * - A program in the folder the command runs in, called by its bare name: Start-Process looks in
+ *   Windows' own folders first, so "Start-Process taskmgr.exe" opened the system's Task Manager
+ *   and not the taskmgr.exe that had just been built there (seen 2026-11-20). It gets its full path.
+ */
+function fixStartProcess(command, cwd, exists = fs.existsSync) {
+  if (!/^\s*Start-Process\b/i.test(command)) return command;
+  let fixed = command.replace(/(\s)--?args?(?=\s)/i, '$1-ArgumentList');
+  const guessed = /^(\s*Start-Process\s+)(["'])([^"']+\\(brave|chrome|msedge|firefox|opera|vivaldi)\.exe)\2/i.exec(fixed);
+  if (guessed && !exists(guessed[3])) fixed = fixed.replace(guessed[0], `${guessed[1]}${guessed[4].toLowerCase()}`);
+  const bare = /^(\s*Start-Process\s+(?:-FilePath\s+)?)(["']?)([^\s"'\\/:]+\.(?:exe|bat|cmd))\2(?=\s|$)/i.exec(fixed);
+  if (bare && cwd && exists(path.join(cwd, bare[3]))) fixed = `${bare[1]}"${path.join(cwd, bare[3])}"${fixed.slice(bare[0].length)}`;
+  return fixed;
+}
+
+/**
+ * A program in the folder the command runs in, called by its bare name ("hello.exe arg"): PowerShell
+ * does not run a program of the current folder by its name alone (it wants ".\hello.exe"), and a
+ * name Windows also knows would start that one instead. Seen with a real model right after it had
+ * compiled hello.exe: one failed command before it used the full path. The name gets its ".\".
+ */
+function fixLocalProgram(command, cwd, exists = fs.existsSync) {
+  const bare = /^(\s*)([A-Za-z0-9_][\w.-]*\.(?:exe|bat|cmd))(?=\s|$)/i.exec(String(command));
+  return bare && cwd && exists(path.join(cwd, bare[2])) ? `${bare[1]}.\\${bare[2]}${command.slice(bare[0].length)}` : command;
+}
+
 let vcvarsPath = null;
 /** The script that sets up Visual Studio's 64-bit C++ environment, or '' without the C++ tools. */
 async function findVcvars() {
@@ -959,10 +1009,8 @@ class ToolRunner {
           // PowerShell parameter (it is -ArgumentList), and a browser's guessed path that does not exist
           // ("C:\Program Files\Google\Brave\Brave.exe") is started by its name, which Windows knows.
           let corrected = '';
-          if (process.platform === 'win32' && /^\s*Start-Process\b/i.test(toRun)) {
-            let fixed = toRun.replace(/(\s)--?args?(?=\s)/i, '$1-ArgumentList');
-            const guessed = /^(\s*Start-Process\s+)(["'])([^"']+\\(brave|chrome|msedge|firefox|opera|vivaldi)\.exe)\2/i.exec(fixed);
-            if (guessed && !fs.existsSync(guessed[3])) fixed = fixed.replace(guessed[0], `${guessed[1]}${guessed[4].toLowerCase()}`);
+          if (process.platform === 'win32') {
+            const fixed = fixLocalProgram(fixStartProcess(toRun, cwd), cwd);
             if (fixed !== toRun) { corrected = fixed; toRun = fixed; }
           }
           if (process.platform === 'win32' && /^msbuild(?:\.exe)?(?=\s|$)/i.test(command)) {
@@ -971,12 +1019,13 @@ class ToolRunner {
           }
           // Microsoft's compiler called directly: run inside Visual Studio's environment (see compilerCall).
           let compileScript = '';
-          const compiler = process.platform === 'win32' ? compilerCall(command) : '';
+          const { compile: compiler, rest: afterCompiler } = splitAfterCompiler(process.platform === 'win32' ? compilerCall(command) : '');
           const vcvars = compiler ? await findVcvars() : '';
           if (vcvars) {
             compileScript = path.join(require('node:os').tmpdir(), `uma-cl-${process.pid}-${Date.now()}.cmd`);
             await fsp.writeFile(compileScript, `@echo off\r\ncall "${vcvars}" >nul 2>&1\r\n${compiler.replace(/%/g, '%%')}\r\nexit /b %errorlevel%\r\n`);
-            toRun = `& "${compileScript}"`;
+            // What followed the compiler in the same command runs afterwards, in PowerShell, when it built.
+            toRun = `& "${compileScript}"${afterCompiler ? `; if ($LASTEXITCODE -eq 0) { ${afterCompiler} }` : ''}`;
           }
           const result = await runCommand(toRun, cwd, args.timeout_seconds, signal).finally(() => (compileScript ? fsp.rm(compileScript, { force: true }).catch(() => {}) : null));
           let output = result.output.trim() || '(no output)';
@@ -1047,4 +1096,4 @@ class ToolRunner {
   }
 }
 
-module.exports = { ToolRunner, TOOL_DOCS, toolDocs, translateChains, adaptForPowerShell, fixProgramCalls, replaceInLegacyText, compilerCall };
+module.exports = { ToolRunner, TOOL_DOCS, toolDocs, translateChains, adaptForPowerShell, fixProgramCalls, replaceInLegacyText, compilerCall, splitAfterCompiler, fixStartProcess, fixLocalProgram };

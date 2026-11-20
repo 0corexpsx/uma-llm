@@ -140,49 +140,67 @@ class BenchmarkManager {
     this.emit('benchmark:progress', this.progress);
   }
 
-  /** One short, fixed reply with the model as it is loaded now: tokens written per second. */
-  async measureSpeed(signal) {
-    await this.llama.complete({ messages: [{ role: 'user', content: 'Reply with exactly: ready' }], maxTokens: 8, temperature: 0, signal });
-    const completion = await this.llama.complete({
-      messages: [{ role: 'user', content: 'Explain in plain prose, in about 150 words, how a bicycle stays upright while it moves.' }],
-      maxTokens: 96,
-      temperature: 0,
-      signal,
-    });
-    const timings = completion.timings || {};
-    const tokens = Number(timings.predicted_n || completion.usage?.completion_tokens || 0);
-    return Number(timings.predicted_per_second) || (tokens && completion.elapsedMs ? tokens / (completion.elapsedMs / 1000) : 0);
+  /**
+   * How the model does as it is loaded now, in tokens per second: writing prose, writing new
+   * code, and reading a text of about 1,300 tokens it has not seen (`seed` makes it new each time).
+   * `write` is the mean of the two kinds of writing, and is what decides between settings: guessing
+   * ahead keeps more of its guesses in prose than in code, and Uma is used for both.
+   */
+  async measure(signal, seed) {
+    const say = (content, maxTokens) => this.llama.complete({ messages: [{ role: 'user', content }], maxTokens, temperature: 0, signal });
+    const speed = (completion) => {
+      const timings = completion.timings || {};
+      const tokens = Number(timings.predicted_n || completion.usage?.completion_tokens || 0);
+      return Number(timings.predicted_per_second) || (tokens && completion.elapsedMs ? tokens / (completion.elapsedMs / 1000) : 0);
+    };
+    await say('Reply with exactly: ready', 8);
+    const prose = speed(await say('Explain in plain prose, in about 150 words, how a bicycle stays upright while it moves.', 96));
+    const code = speed(await say('Write a C++ class TaskList for a to-do program: add a task with a title and a due date, mark one done, remove one, and list the open tasks sorted by date. Code only, with short comments.', 96));
+    const text = Array.from({ length: 38 }, (_, index) => `Entry ${seed}-${index}: the workshop ledger notes the date, the owner, the fault that was found, the part that was changed and how long the work took.`).join(' ');
+    const reading = (await say(`${text}\nIn one word, what is this text about?`, 1)).timings || {};
+    const round = (value) => Math.round(value * 100) / 100 || null;
+    return {
+      prose: round(prose),
+      code: round(code),
+      write: round(prose && code ? (prose + code) / 2 : prose || code),
+      read: Number(reading.prompt_n) >= 400 ? Math.round(Number(reading.prompt_per_second) || 0) || null : null,
+    };
   }
 
   /**
-   * "Optimize and benchmark": loads the active model with one setting changed at a time, measures
-   * each, saves the fastest combination in the model's own settings, and then runs the benchmark
-   * with it. What is tried depends on the PC:
-   * - a number of GPU layers set by hand against the automatic choice (a hand-set number left 19
-   *   of 66 layers on the CPU of a PC whose three cards had room for all of them);
-   * - with several graphics cards: all of them one after the other (layer) or at the same time
-   *   (tensor), each kind of card alone when the model fits on it, and cards of the same kind
-   *   together. Measured on an RTX 3060 with two Tesla P40: a 27B wrote 6.7 tok/s in layer mode
-   *   and 9.0 in tensor mode, a 9B 22 shared between the three and 35 on the RTX 3060 alone;
-   * - the number of CPU threads.
-   * A change is kept only when it is at least 3% faster than what the model had. Nothing is saved
-   * when the run is cancelled or fails.
+   * "Optimize and benchmark": loads the active model with one thing changed at a time, measures
+   * each (see measure), saves what was clearly faster in the model's own settings, and then runs
+   * the benchmark with it. The plans and the rules for keeping a result are in optimizer.cjs:
+   * - where the model goes: GPU layers set by hand against Uma's choice, and with several
+   *   graphics cards which of them take part and whether they work at the same time;
+   * - the number of CPU threads, when part of the model runs on the CPU;
+   * - guessing ahead on or off;
+   * - a larger context, when it fits on the cards and the model writes no slower with it.
+   * A faster setting is kept when it writes at least 3% faster than what the model had. Nothing is
+   * saved when the run is cancelled or fails.
    */
   async optimize({ signal }) {
     const model = await this.models.resolveActive();
     if (!model) throw new Error(t('No model is selected. Download one in Models first.'));
     if (!(await this.runtime.status()).installed) throw new Error(t('The llama.cpp runtime is not installed. Open Models to install it.'));
-    const { sanitizeModelSettings, defaultThreads } = require('./modelSettings.cjs');
+    const { sanitizeModelSettings, defaultThreads, DEFAULTS } = require('./modelSettings.cjs');
+    const { placementSteps, skipStep, threadCounts, fastest, contextTarget, keepContext } = require('./optimizer.cjs');
+    const { chosenCards } = require('./placement.cjs');
+    const { estimateMemory } = require('./memory.cjs');
+    const MiB = 1024 * 1024;
     const startedAt = Date.now();
     const overrides = { ...(this.store.getSettings().modelOverrides?.[model.id] || {}) };
     const effective = this.store.getEffectiveSettings(model.id);
     // The same batch size for every step: its tuning would otherwise change it between loads.
     const fixed = { batchTuning: 'off', ubatchSize: overrides.ubatchSize || 512 };
     const tried = [];
+    const kept = [];
     let total = 4;
+    // The most free memory on one graphics card with no model loaded, for a PC with one card.
+    let freeBeforeMB = 0;
     const step = async (label, changes) => {
       if (signal.aborted) { const err = new Error('cancelled'); err.name = 'AbortError'; throw err; }
-      const entry = { label, changes, tokensPerSecond: null, failed: false };
+      const entry = { label, changes, write: null, read: null, failed: false, allOnGpu: null };
       tried.push(entry);
       total = Math.max(total, tried.length);
       this.update({
@@ -193,10 +211,13 @@ class BenchmarkManager {
         model: { id: model.id, name: model.name, quant: model.quant, size: model.size },
       });
       await this.llama.stop({ silent: true });
+      if (tried.length === 1) freeBeforeMB = Math.round((await Promise.resolve(this.llama.freeVram?.()).catch(() => 0) || 0) / MiB);
       this.llama.trialSettings = { ...fixed, ...changes };
       try {
         await this.llama.ensureServer(model);
-        entry.tokensPerSecond = Math.round((await this.measureSpeed(signal)) * 100) / 100 || null;
+        Object.assign(entry, await this.measure(signal, tried.length));
+        const device = this.llama.computeInfo?.() || {};
+        entry.allOnGpu = device.totalLayers ? device.offloadedLayers >= device.totalLayers : null;
       } catch (err) {
         if (err.name === 'AbortError' || signal.aborted) throw err;
         // A combination that does not load (not enough memory on a card, say) is only left out.
@@ -204,69 +225,74 @@ class BenchmarkManager {
       }
       return entry;
     };
-    const fastest = (entries, than) => entries
-      .filter((entry) => entry.tokensPerSecond)
-      .reduce((best, entry) => (entry.tokensPerSecond > best.tokensPerSecond * 1.03 ? entry : best), than);
+    // The best so far, and a note of each step that became it.
+    let best;
+    const adopt = (entry) => {
+      if (entry !== best) kept.push(entry);
+      best = entry;
+    };
+    const applied = (changes) => {
+      const settings = { ...effective };
+      for (const [key, value] of Object.entries(changes)) {
+        if (value === null) delete settings[key];
+        else settings[key] = value;
+      }
+      return settings;
+    };
 
     this.loadedModel = this.llama.status().running && this.llama.modelId === model.id ? '' : model.id;
-    let best;
     try {
       const baseline = await step(t('Current settings'), {});
-      if (!baseline.tokensPerSecond) throw new Error(t('The model did not load with its current settings, so there is nothing to compare with.'));
+      if (!baseline.write) throw new Error(t('The model did not load with its current settings, so there is nothing to compare with.'));
       best = baseline;
       const guessing = Boolean(this.llama.speculation);
-
-      // How the model is placed: layers and graphics cards.
-      const placement = [];
-      const auto = overrides.gpuLayers !== undefined ? { gpuLayers: null } : {};
-      if (overrides.gpuLayers !== undefined) placement.push([t('GPU layers chosen by Uma'), auto]);
-      const cards = this.llama.cards.all || [];
+      const cards = this.llama.cards?.all || [];
       const helpers = this.llama.status().helpers?.servers?.length > 0;
-      if (cards.length > 1 && !helpers) {
-        const short = (name) => String(name || '').replace(/^NVIDIA\s+(GeForce\s+)?/i, '');
-        const needMB = (this.llama.needMB || 0) + (this.llama.draft?.memoryMB || 0);
-        const everything = { ...auto, gpuCards: null };
-        const tensorNow = effective.splitMode === 'tensor';
-        if (effective.gpuCards) placement.push([t('All cards, one after the other'), { ...everything, splitMode: null }]);
-        placement.push(tensorNow && !effective.gpuCards
-          ? [t('All cards, one after the other'), { ...everything, splitMode: null }]
-          : [t('All cards at the same time'), { ...everything, splitMode: 'tensor' }]);
-        const kinds = new Map();
-        for (const device of cards) kinds.set(device.card, [...(kinds.get(device.card) || []), device]);
-        for (const [card, group] of kinds) {
-          // One card of this kind alone: the one with the most free memory.
-          const roomiest = [...group].sort((a, b) => b.freeMB - a.freeMB)[0];
-          if (needMB && needMB <= roomiest.freeMB * 0.92 && effective.gpuCards !== roomiest.name) {
-            placement.push([t('{0} alone', [short(card)]), { ...auto, gpuCards: roomiest.name, splitMode: null }]);
-          }
-          const room = group.reduce((sum, device) => sum + device.freeMB, 0);
-          if (group.length > 1 && group.length < cards.length && needMB && needMB <= room * 0.85) {
-            const names = group.map((device) => device.name).join(',');
-            const title = `${group.length}× ${short(card)}`;
-            placement.push([t('{0}, one after the other', [title]), { ...auto, gpuCards: names, splitMode: null }]);
-            placement.push([t('{0} at the same time', [title]), { ...auto, gpuCards: names, splitMode: 'tensor' }]);
-          }
-        }
-      }
-      total = 1 + placement.length + 3;
-      const placed = [];
-      for (const [label, changes] of placement) placed.push(await step(label, changes));
-      best = fastest(placed, best);
+      const needMB = (this.llama.needMB || 0) + (this.llama.draft?.memoryMB || 0);
 
-      // CPU threads, on top of the best placement: they matter most when part of the model is in RAM.
-      const logical = os.cpus().length;
-      const now = Number(effective.threads) || defaultThreads();
-      const counts = [...new Set([Math.max(1, Math.floor(logical / 2)), Math.min(8, logical)])].filter((count) => count !== now);
-      total = tried.length + counts.length + 1;
+      // Where the model goes: GPU layers and graphics cards.
+      const placement = placementSteps({ cards, needMB, overrides, effective, helpers });
+      total = 1 + placement.length + 2;
+      // What all the cards together showed, each way of sharing: the baseline counts when it is one of them.
+      const usesAll = !chosenCards(cards, effective.gpuCards).length;
+      const allSpeeds = usesAll && cards.length > 1 && overrides.gpuLayers === undefined ? { [effective.splitMode === 'tensor' ? 'tensor' : 'layer']: baseline.write } : {};
+      const placed = [];
+      for (const plan of placement) {
+        if (skipStep(plan, allSpeeds)) { total -= 1; continue; }
+        const entry = await step(plan.label, plan.changes);
+        if (plan.all && plan.split && entry.write) allSpeeds[plan.split] = entry.write;
+        placed.push(entry);
+      }
+      adopt(fastest(placed, best));
+
+      // CPU threads, on top of the best placement, when part of the model runs on the CPU.
+      const counts = threadCounts({ logical: os.cpus().length, now: Number(effective.threads) || defaultThreads(), allOnGpu: best.allOnGpu === true });
+      total = tried.length + counts.length + 2;
       const threaded = [];
       for (const count of counts) threaded.push(await step(t('{0} CPU threads', [count]), { ...best.changes, threads: count }));
-      best = fastest(threaded, best);
+      adopt(fastest(threaded, best));
 
       // Guessing ahead (the model's own MTP head, n-gram): on by default, kept only when not slower.
       const guessed = [];
       if (guessing) guessed.push(await step(t('Without guessing ahead'), { ...best.changes, mtp: 'off', ngram: 'off' }));
       else if (effective.mtp === 'off' || effective.ngram === 'off') guessed.push(await step(t('With guessing ahead'), { ...best.changes, mtp: null, ngram: null }));
-      best = fastest(guessed, best);
+      adopt(fastest(guessed, best));
+
+      // A larger context, when every layer is on the cards and stays there with it.
+      const info = await Promise.resolve(this.models.modelInfo?.(model.id)).catch(() => null);
+      const using = chosenCards(cards, applied(best.changes).gpuCards);
+      const inUse = using.length ? using : cards;
+      const roomMB = inUse.length > 1 ? inUse.reduce((sum, device) => sum + device.freeMB, 0) * 0.85 : (inUse[0]?.freeMB || freeBeforeMB) * 0.92;
+      const wantMB = (size) => (info ? Math.ceil(estimateMemory(info, { ...DEFAULTS, ...applied(best.changes), contextSize: size, gpuLayers: 999 }).gpuBytes / MiB) || 0 : 0);
+      const current = Number(applied(best.changes).contextSize) || 8192;
+      const target = best.allOnGpu === true && roomMB > 0
+        ? contextTarget({ current, trained: info?.contextLength || 0, fits: (size) => wantMB(size) > 0 && wantMB(size) + 700 * Math.max(1, inUse.length) + (this.llama.draft?.memoryMB || 0) <= roomMB })
+        : 0;
+      total = tried.length + (target ? 1 : 0);
+      if (target) {
+        const larger = await step(t('Context of {0} tokens', [target.toLocaleString('en-US')]), { ...best.changes, contextSize: target });
+        if (keepContext(larger, best)) adopt(larger);
+      }
     } catch (err) {
       this.llama.trialSettings = null;
       await this.llama.stop({ silent: true }).catch(() => {});
@@ -290,11 +316,12 @@ class BenchmarkManager {
       signal,
       optimization: {
         changed,
-        chosen: best.label,
-        tried: tried.map((entry) => ({ label: entry.label, tokensPerSecond: entry.tokensPerSecond, failed: entry.failed, chosen: entry === best })),
+        kept: changed ? kept.map((entry) => entry.label) : [],
+        tried: tried.map((entry) => ({ label: entry.label, write: entry.write, prose: entry.prose ?? null, code: entry.code ?? null, read: entry.read, failed: entry.failed, kept: changed && kept.includes(entry) })),
       },
     });
   }
+
 
   async execute({ signal, optimization = null }) {
     const model = await this.models.resolveActive();

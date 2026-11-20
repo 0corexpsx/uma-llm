@@ -8653,6 +8653,12 @@ a {
 .gpu-card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 .gpu-card-head strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 600; color: var(--text-soft); }
 .gpu-card-when { flex: none; font-size: 9.5px; color: var(--faint); font-variant-numeric: tabular-nums; }
+/* A card in a slot with fewer PCIe lanes than it can use. */
+.gpu-card-lanes { color: var(--warning); cursor: help; }
+/* Model settings: the box that finds a setting by its name, and what it hides while in use. */
+.mset-search { margin-bottom: 10px; }
+.mset-body.is-filtering > h4, .mset-body.is-filtering > .mset-vision, .mset-body.is-filtering > .mset-memory, .mset-body.is-filtering > .callout { display: none; }
+.mset-none { color: var(--muted); font-size: 12px; margin: 6px 0 0; }
 .gpu-card-values { display: flex; flex-wrap: wrap; gap: 2px 12px; margin: 3px 0 5px; font-size: 10px; color: var(--muted); }
 .gpu-card-values span { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
 .gpu-card-values b { font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }

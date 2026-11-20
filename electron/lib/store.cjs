@@ -81,6 +81,9 @@ const DEFAULT_SETTINGS = {
   lastUpdateCheck: 0,
   // Load the selected model when Uma opens (and when another is selected), so the first reply does not wait for it.
   loadModelAtStart: true,
+  // Get the model ready when the user starts to write a message: load it if it is asleep, and read
+  // Uma's instructions ahead (AgentRunner.warm), so the first word does not wait for either.
+  loadOnTyping: true,
   skillsSeeded: false,
   seededSkills: [],
   modelOverrides: {},
@@ -132,6 +135,27 @@ class Store {
     if (overrides && Object.keys(overrides).length) all[modelId] = overrides;
     else delete all[modelId];
     return this.updateSettings({ modelOverrides: all });
+  }
+
+  /**
+   * Takes draft models that are no longer installed out of the other models' settings. A model
+   * that was removed stayed chosen as the draft of another: it was looked for at every load ("the
+   * draft model chosen for this model is no longer installed"), and one of that name installed
+   * again later would have taken the place of the model's own, faster way of guessing ahead.
+   * `installed` holds the ids of the models that are there. Returns how many were taken out.
+   */
+  async forgetMissingDrafts(installed) {
+    const all = { ...(this.settings.modelOverrides || {}) };
+    let removed = 0;
+    for (const [id, overrides] of Object.entries(all)) {
+      if (!overrides?.draftModelId || installed.has(overrides.draftModelId)) continue;
+      const { draftModelId, draftTokens, ...rest } = overrides;
+      if (Object.keys(rest).length) all[id] = rest;
+      else delete all[id];
+      removed += 1;
+    }
+    if (removed) await this.updateSettings({ modelOverrides: all });
+    return removed;
   }
 
   async updateSettings(patch) {

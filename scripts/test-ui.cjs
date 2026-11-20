@@ -42,6 +42,7 @@ const TESTS = [
   ['ui-gpucards-test', [], ''],
   ['ui-gpucards-test', ['one'], ''],
   ['ui-optimize-test', [], ''],
+  ['ui-optimize-test', ['old'], ''],
   ['ui-library-test', [], 'network'],
   ['ui-vision-test', [], 'network'],
   ['ui-input-test', [], 'input'],

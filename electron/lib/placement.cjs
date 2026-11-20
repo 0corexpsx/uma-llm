@@ -154,6 +154,36 @@ function localCards(devices, names) {
   return { used, missing: cards.filter((card) => !card.taken).map((card) => card.name) };
 }
 
+/**
+ * The engine's devices for the cards chosen for a model (its "Graphics cards used" setting), out
+ * of `devices` (localCards().used). The choice is a list of card names, one per card wanted:
+ * "Tesla P40,Tesla P40" is two of them, "Tesla P40" the one with the most free memory. Names stay
+ * right when the engine numbers its devices differently (a driver update, a card moved to another
+ * slot); the engine's own device names ("CUDA1,CUDA2"), which 0.2.90 to 0.2.92 saved, do not, but
+ * are still honoured while they exist. Returns [] when there is no choice or it cannot be met (a
+ * card was taken out): every card is then used.
+ */
+function chosenCards(devices, choice) {
+  const wanted = String(choice || '').split(',').map((item) => item.trim()).filter(Boolean);
+  if (!wanted.length) return [];
+  if (wanted.every((item) => devices.some((device) => device.name === item))) return devices.filter((device) => wanted.includes(device.name));
+  const left = [...devices].sort((a, b) => b.freeMB - a.freeMB);
+  const picked = new Set();
+  for (const name of wanted) {
+    const key = cardKey(name);
+    const index = left.findIndex((device) => key && cardKey(device.card || device.description) === key);
+    if (index < 0) return [];
+    picked.add(left.splice(index, 1)[0]);
+  }
+  // In the engine's own order, which is the order -dev lists them in.
+  return devices.filter((device) => picked.has(device));
+}
+
+/** The choice that names these devices' cards, as chosenCards reads it. */
+function cardChoice(devices) {
+  return devices.map((device) => device.card || device.description).join(',');
+}
+
 /** llama-server arguments for a plan. */
 function placementArgs(plan) {
   if (!plan?.devices.length) return [];
@@ -167,4 +197,4 @@ function placementArgs(plan) {
   return [...names, '--fit-target', plan.devices.map((device) => device.targetMB).join(',')];
 }
 
-module.exports = { planPlacement, placementArgs, parseDeviceList, labelDevices, localCards, GPU_MARGIN_MB, DEFAULT_RAM_RESERVE_MB };
+module.exports = { planPlacement, placementArgs, parseDeviceList, labelDevices, localCards, chosenCards, cardChoice, GPU_MARGIN_MB, DEFAULT_RAM_RESERVE_MB };

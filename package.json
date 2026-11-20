@@ -1,7 +1,7 @@
 {
   "name": "uma-llm",
   "productName": "Uma LLM",
-  "version": "0.2.92",
+  "version": "0.2.93",
   "description": "Uma LLM: a private AI assistant that runs local models on your own PC.",
   "desktopName": "uma-llm.desktop",
   "main": "electron/main.cjs",

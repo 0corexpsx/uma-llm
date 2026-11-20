@@ -53,7 +53,16 @@ function CardGraph({ index, samples }) {
     <div className="gpu-card" data-card={index + 1}>
       <div className="gpu-card-head">
         <strong title={latest.card.name}>{index + 1} · {latest.card.name.replace(/^NVIDIA\s+(GeForce\s+)?/i, '')}</strong>
-        <span className="gpu-card-when">{hover !== null && secondsAgo > 0 ? t('{0} s ago', [secondsAgo]) : ''}</span>
+        {hover !== null && secondsAgo > 0 ? (
+          <span className="gpu-card-when">{t('{0} s ago', [secondsAgo])}</span>
+        ) : latest.card.lanes ? (
+          // A card that can use more PCIe lanes than its slot gives it.
+          <span className="gpu-card-when gpu-card-lanes" title={t('This card’s slot gives it {0} of the {1} PCIe lanes it can use. Cards that share a model and work at the same time exchange data on every word, so a narrow slot can hold them back. If the PC has a free slot with more lanes, the card may be faster there.', [latest.card.lanes, latest.card.lanesMax])}>
+            PCIe ×{latest.card.lanes}/{latest.card.lanesMax}
+          </span>
+        ) : (
+          <span className="gpu-card-when" />
+        )}
       </div>
       <div className="gpu-card-values">
         <span><i className="gpu-key is-gpu" />{t('GPU')} <b>{shown.card.percent}%</b></span>

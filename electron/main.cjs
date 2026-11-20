@@ -370,6 +370,20 @@ async function loadSelectedModel() {
   const model = await models.resolveActive();
   if (!model || !(await runtime.status()).installed) return;
   await llama.ensureServer(model).catch(() => {});
+  // With the model in memory, the engine reads Uma's instructions too, so the first message does not wait for them.
+  agent?.warm().catch(() => {});
+}
+
+/**
+ * The user began to write a message: the model is loaded if it is asleep, and the engine reads
+ * Uma's instructions meanwhile ("Get ready while I type" in Settings). Nothing is waited for here.
+ */
+async function warmForTyping(conversationId) {
+  if (store.getSettings().loadOnTyping === false || !workspace || !agent) return false;
+  if (network.isSharing() || network.settings().share || benchmark?.status().running || agent.isBusy()) return false;
+  if (!(await runtime.status()).installed) return false;
+  agent.warm(conversationId || null).catch(() => {});
+  return true;
 }
 
 /** Refreshes the title bar readings, and skips the work while the window is minimized. */
@@ -448,6 +462,8 @@ async function initServices() {
     emit: send,
   });
   await models.init();
+  // Draft models that were removed are taken out of the other models' settings (store.forgetMissingDrafts).
+  await store.forgetMissingDrafts(new Set(store.getInstalledModels().map((entry) => entry.id))).catch(() => 0);
   runtime = new RuntimeManager({
     store,
     runtimeDir: dirs.runtime,
@@ -960,6 +976,7 @@ function registerIpc() {
   ipcMain.handle('models:remove', async (_event, id) => {
     await llama.stop({ silent: true });
     await models.remove(id);
+    await store.forgetMissingDrafts(new Set(store.getInstalledModels().map((entry) => entry.id))).catch(() => 0);
     return models.list();
   });
   ipcMain.handle('models:import', async () => {
@@ -1002,6 +1019,14 @@ function registerIpc() {
       topP: general.topP,
     };
     const settings = { ...defaults, ...overrides };
+    // This PC's graphics cards as the engine lists them, when it has several. A card choice saved
+    // as the engine's own device names (0.2.90 to 0.2.92) is shown, and saved again, as card names.
+    const cards = await llama.engineCards(store.getRuntime()).catch(() => []);
+    if (settings.gpuCards && cards.length > 1) {
+      const { chosenCards, cardChoice } = require('./lib/placement.cjs');
+      const picked = chosenCards(cards, settings.gpuCards);
+      settings.gpuCards = picked.length && picked.length < cards.length ? cardChoice(picked) : '';
+    }
     // Installed models that can guess words for this one: the same vocabulary, and much smaller.
     const ownSize = (item) => (item.parts?.length ? item.parts.reduce((sum, part) => sum + (part.size || 0), 0) : item.size || 0);
     const draftCandidates = [];
@@ -1023,8 +1048,7 @@ function registerIpc() {
       draftSuggestion: !draftCandidates.length && suggestion && ownSize(entry) > suggestion.sizeBytes * 3 ? suggestion : null,
       // The batch sizes measured for this model with the current helper PCs and engine.
       batchTuning: { ...(await batchTuner.report(llama.batchKey(entry, store.getRuntime()))), byHand: overrides.ubatchSize !== undefined },
-      // This PC's graphics cards as the engine names them, when it has several.
-      cards: await llama.engineCards(store.getRuntime()).catch(() => []),
+      cards,
     };
   });
   // Measures the three batch sizes now: the model is loaded with each and reads a fixed text twice.
@@ -1216,6 +1240,7 @@ function registerIpc() {
     const model = await models.resolveActive();
     if (!model) throw new Error(t('Choose a model first'));
     await llama.ensureServer(model);
+    agent?.warm().catch(() => {});
     return llama.status();
   });
   // Server status screen: this PC and every helper, asked every two seconds while it is open.
@@ -1461,6 +1486,7 @@ function registerIpc() {
     input?.resume();
     return agent.send(conversationId, text, attached || []);
   });
+  ipcMain.handle('chat:warm', async (_event, conversationId) => warmForTyping(conversationId).catch(() => false));
   ipcMain.handle('attachments:add', async (_event, file) => attachments.add(file));
   ipcMain.handle('attachments:remove', async (_event, id) => attachments.remove([id]));
   ipcMain.handle('system:stats', async () => {

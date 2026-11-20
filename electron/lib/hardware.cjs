@@ -12,7 +12,7 @@ function run(file, args, timeout = 5000) {
   });
 }
 
-const NVIDIA_QUERY = ['--query-gpu=name,memory.total,memory.free,memory.used,utilization.gpu', '--format=csv,noheader,nounits'];
+const NVIDIA_QUERY = ['--query-gpu=name,memory.total,memory.free,memory.used,utilization.gpu,pcie.link.width.current,pcie.link.width.max', '--format=csv,noheader,nounits'];
 
 /**
  * nvidia-smi's answer to NVIDIA_QUERY, one line per card ("Tesla P40, 24576, 24210, 366, 0"), as
@@ -22,18 +22,36 @@ const NVIDIA_QUERY = ['--query-gpu=name,memory.total,memory.free,memory.used,uti
 function parseNvidiaCards(text) {
   const cards = [];
   for (const line of String(text || '').split(/\r?\n/)) {
-    const [name, total, free, used, percent] = line.split(',').map((value) => value.trim());
+    const [name, total, free, used, percent, lanes, lanesMax] = line.split(',').map((value) => value.trim());
     const totalMB = Number(total);
     if (!name || !(totalMB > 0)) continue;
-    cards.push({ name, totalMB, freeMB: Number(free) || 0, usedMB: Number(used) || 0, percent: Number(percent) || 0 });
+    cards.push({
+      name, totalMB, freeMB: Number(free) || 0, usedMB: Number(used) || 0, percent: Number(percent) || 0,
+      // PCIe lanes the card's slot gives it, and how many the card can use (0 when not reported):
+      // a 16-lane card in a 4-lane slot exchanges data with the other cards more slowly.
+      lanes: Number(lanes) || 0, lanesMax: Number(lanesMax) || 0,
+    });
   }
   return cards;
 }
 
+// The same question without the PCIe lanes, for an nvidia-smi that does not know those two fields:
+// it answers an unknown field with an error and no cards at all.
+const NVIDIA_QUERY_PLAIN = ['--query-gpu=name,memory.total,memory.free,memory.used,utilization.gpu', '--format=csv,noheader,nounits'];
+let lanesKnown = true;
+
 /** Every NVIDIA card in this PC with its memory and how busy it is, or [] without nvidia-smi. */
-async function nvidiaCards(timeout = 5000) {
+async function nvidiaCards(timeout = 5000, ask = run) {
   if (process.platform === 'darwin') return [];
-  return parseNvidiaCards(await run('nvidia-smi', NVIDIA_QUERY, timeout));
+  if (lanesKnown) {
+    const cards = parseNvidiaCards(await ask('nvidia-smi', NVIDIA_QUERY, timeout));
+    if (cards.length) return cards;
+    const plain = parseNvidiaCards(await ask('nvidia-smi', NVIDIA_QUERY_PLAIN, timeout));
+    // Cards that answer only the plain question: the lanes are not asked for again.
+    if (plain.length) lanesKnown = false;
+    return plain;
+  }
+  return parseNvidiaCards(await ask('nvidia-smi', NVIDIA_QUERY_PLAIN, timeout));
 }
 
 /** One name for several cards: "NVIDIA GeForce RTX 3060 + 2× Tesla P40". */

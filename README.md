@@ -32,7 +32,7 @@ No account, no cloud, no subscription. Uma downloads an open-weight model, insta
 
 ### Windows installer
 
-Download the latest installer, `Uma-LLM-Setup-0.2.85.exe`, from the [Releases](../../releases) page or from the [Uma website](https://ocorex.genesyslabs.it), and run it. The installer is per-user and does not need administrator rights. Once installed, Uma finds new versions by itself and updates in the background.
+Download the latest installer, `Uma-LLM-Setup-<version>.exe`, from the [Releases](../../releases) page or from the [Uma website](https://ocorex.genesyslabs.it), and run it. The installer is per-user and does not need administrator rights. Once installed, Uma finds new versions by itself and updates in the background.
 
 If you build Uma yourself (see [Development](#development)), the installer is created in the `release/` folder and `release/win-unpacked/Uma LLM.exe` runs without installing.
 
@@ -295,8 +295,10 @@ The plan is in the model panel on the right and in the log (`[uma] plan for 3 gr
 
 **Getting more speed out of several cards.** Two settings of each model (**Models → the model's settings → Speed**) change that, and **Optimize and benchmark** in the Benchmark tab measures them and chooses for you:
 
-- **Graphics cards used**: all cards, one card alone, or the cards of the same kind together. A model that fits on one card is faster there than shared between several.
+- **Graphics cards used**: all cards, one card alone, or the cards of the same kind together. A model that fits on one card is faster there than shared between several. The choice is kept by the cards' names ("two Tesla P40"), so it still means the same cards after a driver update or a card moved to another slot.
 - **Split between graphics cards**: `auto`/`layer` (one card after the other) or `tensor` (the cards work at the same time; llama.cpp calls it experimental). `row` does not load on NVIDIA cards.
+
+The panel on the right of a chat says what the loaded model uses: the cards and their shares, *The cards work at the same time* for `tensor`, and a card chosen to run it alone. The settings of a model have a search box (**Find a setting…**) for finding these by name.
 
 Measured on an RTX 3060 (12 GB) with two Tesla P40 (24 GB each), llama.cpp b12428, tokens written per second:
 
@@ -306,6 +308,8 @@ Measured on an RTX 3060 (12 GB) with two Tesla P40 (24 GB each), llama.cpp b1242
 | Qwen3.8 9B Q8 (10 GB) | 22.4 | 21.8 | not measured | not measured | **35.5** |
 
 Cards of the same kind work best together: the smaller, different card slowed the other two down.
+
+**A card in a narrow slot.** A card that can use 16 PCIe lanes sometimes sits in a slot that gives it 4. Cards that work at the same time exchange data on every word, so this can hold them back. Uma marks such a card in the graph of the panel on the right (`PCIe ×4/16`); whether another slot helps was not measured.
 
 **A card that is not used.** If the engine does not list a card, nothing can run on it, and the model panel says *Not used by this engine*. The usual reasons:
 
@@ -344,18 +348,32 @@ The gauge icon opens a local performance lab. One run produces:
 - **CPU and RAM** — the `llama-server` process's CPU time and working set, plus system RAM.
 - **Model load time** — reported separately from generation, so a cold load does not flatter the score.
 
-**Optimize and benchmark** looks for the fastest settings of the active model on this PC before it measures. It loads the model several times, each time with one thing changed, and writes a short fixed reply:
+**Optimize and benchmark** looks for the fastest settings of the active model on this PC before it measures. It loads the model several times, each time with one thing changed, and measures three things each time: prose written, new code written, and a text of about 1,300 tokens read. The mean of the two kinds of writing decides.
 
 - the number of GPU layers chosen by Uma, when a number was set by hand;
-- with several graphics cards: all of them one after the other or at the same time, each kind of card alone when the model fits on it, and cards of the same kind together;
-- the number of CPU threads;
-- guessing ahead (below) on or off.
+- with several graphics cards: all of them one after the other or at the same time, one card of each kind alone when the model fits on it, and cards of the same kind together (a group is tried only the way that won for all the cards);
+- the number of CPU threads, when part of the model runs on the CPU (with every layer on a card it made no difference: 28, 14 and 8 threads wrote 12.54, 12.54 and 12.55 tok/s);
+- guessing ahead (below) on or off;
+- a larger context, 32,768 or 65,536 tokens, when it fits on the cards and the model writes no slower with it. A task on files fills a small one: a chat reached 13,890 of 20,480 tokens, was trimmed, and the engine read 33,229 tokens in all, most of them twice. With Qwen3.8 27B, 65,536 tokens cost about 2 GB more than 20,480 and wrote as fast (24.4 tok/s).
 
-The fastest combination is saved in the model's own settings, but only when it is at least 3% faster than what the model had; the result lists everything that was tried with its speed. Nothing is saved when the run is cancelled. With a 30 GB model it takes about eight minutes. Run it again after changing the cards, the engine or the model's context size.
+A faster setting is kept in the model's own settings only when it writes at least 3% faster than what the model had; the result lists everything that was tried, with its writing and reading speed. Nothing is saved when the run is cancelled. With a 30 GB model on three cards it takes about four minutes. Run it again after changing the cards or the engine.
+
+Three things were measured on the same PC and are left alone, because they made no difference worth a reload: how far the model's own head guesses ahead (24.0 tok/s at the engine's default of 3 tokens, then 23.8, 22.9 and 19.8 at 4, 6 and 8), the batch size with every layer on this PC's cards (a text read at 251, 256 and 258 tok/s with 512, 1024 and 2048), and an f16 context cache instead of q8 (3% faster, which is what two runs differ by).
+
+### The first word
+
+A first message used to wait for two things: the model, if it had gone to sleep after its idle time, and Uma's instructions, which the engine reads before anything else (in one chat the first word took 37 seconds: 18 to load a 30 GB model, 12 to read 3,100 tokens of instructions). With **Get ready while I type** (Settings → Model behaviour, on by default) both happen while the message is being written: Uma loads the model at the first character and has the engine read the instructions, which it then reuses. Measured: 3,701 tokens took 14.3 s to read once, and the next request with the same instructions read 25 tokens in 0.6 s. It is not done for a chat whose memory is on disk (that is read back instead), nor once the engine holds a chat.
+
+### RAM beside the graphics cards
+
+A model that is entirely on the graphics cards should not fill the PC's RAM as well. Two things did:
+
+- **The model file.** llama.cpp memory-maps it, and on Windows the mapped pages stay in RAM after their contents were copied to the cards (it can give them back only on Linux and macOS). When every layer goes to this PC's cards, Uma on Windows therefore has the file read instead of mapped. Measured with a 30 GB model on a PC with 40 GB of RAM: mapped, the engine held 30.7 GB and the PC had 5.4 GB left, Windows began to page, and some replies waited 40 seconds or more for it; read, the engine holds 4.5 GB and the PC has 31.6 GB left, the load takes 17 s instead of 14, and writing and reading are as fast. A loading mode chosen in the model's settings is left alone, and a load that fails this way is tried again mapped.
+- **The engine's own prompt cache.** It keeps what it read of earlier prompts in RAM, up to 8 GB whatever the PC has. Uma keeps every chat on disk itself, so that cache seldom finds anything (20 times in 266 on one PC). Uma limits it to a tenth of the PC's RAM, between 1 and 8 GB.
 
 ### Guessing ahead without a second model
 
-Uma turns on two ways of writing faster that need nothing downloaded. In both the model checks every guessed word, so the text is the same as without them; only the speed changes. Each has a switch in the model's settings under **Speed**, and a load that fails with them is tried again without.
+Uma turns on two ways of writing faster that need nothing downloaded. In both the model checks every guessed word, so it still decides each one; only the speed changes. (In nine runs with different settings the prose was the same text every time, with and without guessing; a piece of code came out in two versions that differed where two words were about equally likely, as it can between any two settings.) Each has a switch in the model's settings under **Speed**, the panel on the right says which are in use, and a load that fails with them is tried again without.
 
 - **The model's own head (MTP).** Some models carry a small head that predicts the words after the next one (their file says so; "MTP" is often in the name). Uma uses it when the model has one and the engine can (`--spec-type draft-mtp`). A draft model chosen by hand is used instead of it, and it is left out with helper PCs.
 - **Repeated text (n-gram).** When the model writes text that is already in the chat, such as a file written again with a small change, the engine guesses the repeated part (`ngram-mod`). New text is written at the usual speed.
@@ -369,7 +387,7 @@ Measured with llama.cpp b12428 on two Tesla P40 (Qwen3.8 27B Q8, `tensor` split)
 | N-gram | 12.6 | 86.6 |
 | Both (Uma's default) | 25.6 | 108.5 |
 
-The rewrite test is close to the best case for n-gram guessing (forty nearly identical lines); real code repeats less.
+The rewrite test is close to the best case for n-gram guessing (forty nearly identical lines); real code repeats less. Through the chat as Uma uses it, with both on, the same model wrote prose at 24.0, new code at 23.8 and the rewrite at 77 tok/s, against 12.6 for all three without guessing. In a real chat that built a program, 80% of the 12,585 tokens the head guessed were kept, and n-gram guessing added 1,359 tokens.
 
 The benchmark uses the active model, runs a fixed 128-token prompt-cache-off generation, and stores the last 12 runs in `benchmarks.json`. CPU/RAM sampling is Windows-native; NVIDIA GPU metrics require `nvidia-smi`. On AMD/Intel GPUs the backend and VRAM may be reported without per-GPU utilization.
 

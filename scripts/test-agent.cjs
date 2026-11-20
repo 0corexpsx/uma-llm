@@ -805,38 +805,8 @@ async function testSkills() {
   console.log('skills: OK');
 }
 
-/** Builds a small but real GGUF file, so parsing and downloads can be tested without a model. */
-function makeGguf({ architecture = 'qwen3', layers = 2, embd = 64, extra = {} }) {
-  const u32 = (value) => { const b = Buffer.alloc(4); b.writeUInt32LE(value); return b; };
-  const u64 = (value) => { const b = Buffer.alloc(8); b.writeBigUInt64LE(BigInt(value)); return b; };
-  const str = (value) => Buffer.concat([u64(Buffer.byteLength(value)), Buffer.from(value)]);
-  const kvs = {
-    'general.architecture': architecture,
-    'general.name': 'Test Model',
-    [`${architecture}.block_count`]: layers,
-    [`${architecture}.context_length`]: 4096,
-    [`${architecture}.embedding_length`]: embd,
-    [`${architecture}.attention.head_count`]: 4,
-    [`${architecture}.attention.head_count_kv`]: 2,
-    ...extra,
-  };
-  const entries = Object.entries(kvs).map(([key, value]) => Buffer.concat([
-    str(key),
-    typeof value === 'string' ? Buffer.concat([u32(8), str(value)]) : Buffer.concat([u32(4), u32(value)]),
-  ]));
-  // A long string array stands in for the tokenizer, which the reader must step over.
-  entries.push(Buffer.concat([str('tokenizer.ggml.tokens'), u32(9), u32(8), u64(2000), ...Array.from({ length: 2000 }, (_, i) => str(`tok${i}`))]));
-  const tensors = [['token_embd.weight', 100], ...Array.from({ length: layers }, (_, i) => [`blk.${i}.attn.weight`, 1000]), ['output.weight', 200]];
-  let offset = 0;
-  const infos = tensors.map(([name, size]) => {
-    const info = Buffer.concat([str(name), u32(1), u64(size), u32(0), u64(offset)]);
-    offset += size;
-    return info;
-  });
-  const head = Buffer.concat([Buffer.from('GGUF'), u32(3), u64(tensors.length), u64(entries.length), ...entries, ...infos]);
-  const padded = Math.ceil(head.length / 32) * 32;
-  return Buffer.concat([head, Buffer.alloc(padded - head.length), Buffer.alloc(offset, 7)]);
-}
+// A small but real GGUF file, so parsing and downloads can be tested without a model.
+const { makeGguf } = require('./tiny-gguf.cjs');
 
 async function testModelFeatures() {
   // Reading a header, from disk and over HTTP range requests.

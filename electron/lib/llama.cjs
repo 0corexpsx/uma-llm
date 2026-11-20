@@ -6,7 +6,7 @@ const crypto = require('node:crypto');
 const os = require('node:os');
 const { spawn } = require('node:child_process');
 const { sleep } = require('./util.cjs');
-const { DEFAULTS, buildServerArgs, cacheTypeFixes, draftCompatibility, draftArgs, moeCacheShare, speculationArgs, speculationSupport, parseExtraArgs } = require('./modelSettings.cjs');
+const { DEFAULTS, buildServerArgs, cacheTypeFixes, draftCompatibility, draftArgs, moeCacheShare, speculationArgs, speculationSupport, parseExtraArgs, promptCacheLimit } = require('./modelSettings.cjs');
 
 // The first llama.cpp build with the MoE cache (--moe-cache-mib, --moe-cache-cpu-share).
 const MOE_CACHE_BUILD = 12191;
@@ -15,7 +15,7 @@ const CACHE_AFTER_IMAGE_BUILD = 12318;
 const MiB = 1024 * 1024;
 const { estimateMemory } = require('./memory.cjs');
 const { freeVramBytes, gpuSummary } = require('./hardware.cjs');
-const { planPlacement, placementArgs, parseDeviceList, localCards } = require('./placement.cjs');
+const { planPlacement, placementArgs, parseDeviceList, localCards, chosenCards } = require('./placement.cjs');
 const { t } = require('./i18n.cjs');
 
 // Chat memory (chatMemory.cjs): what the engine has read of a chat is saved to disk a few seconds
@@ -61,8 +61,12 @@ function engineHelpText(serverPath) {
 }
 
 class LlamaManager {
-  constructor({ store, runtime, emit, logsDir, modelInfo, getModel = null, freeVram = freeVramBytes, freeRam = () => os.freemem(), network = null, chatMemory = null, batchTuner = null, listDevices = listEngineDevices, engineHelp = engineHelpText }) {
+  constructor({ store, runtime, emit, logsDir, modelInfo, getModel = null, freeVram = freeVramBytes, freeRam = () => os.freemem(), totalRam = () => os.totalmem(), platform = process.platform, network = null, chatMemory = null, batchTuner = null, listDevices = listEngineDevices, engineHelp = engineHelpText }) {
     this.store = store;
+    // The system Uma runs on and its RAM, for how a model file is loaded (see startServer).
+    this.platform = platform;
+    this.totalRam = totalRam;
+    this.readWhole = false;
     // Guessing ahead without a second model (see modelSettings.speculationArgs): what each engine
     // build knows, asked once, and what the current load uses.
     this.engineHelp = engineHelp;
@@ -132,6 +136,9 @@ class LlamaManager {
       } : null,
       // Graphics cards in this PC that the installed engine does not list, so nothing can run on them.
       unusedGpus: this.child ? this.cards.missing : [],
+      // The cards chosen for this model, when not all of them, and how several cards share it.
+      onlyCards: this.child && this.cards.chosen ? this.cards.used.map((device) => device.card) : [],
+      splitMode: this.child && this.cards.used.length > 1 ? this.splitMode || 'layer' : '',
       // Settings Uma changed for this model so it can load (see cacheTypeFixes).
       cacheFix: this.child ? this.cacheFix || '' : '',
       // The small model guessing ahead for this one, and where it runs.
@@ -269,7 +276,14 @@ class LlamaManager {
     if (this.draftFailedKey && this.draftFailedKey !== launchKey) this.draftFailedKey = '';
     if (this.moeFailedKey && this.moeFailedKey !== launchKey) this.moeFailedKey = '';
     if (this.specFailedKey && this.specFailedKey !== launchKey) this.specFailedKey = '';
+    if (this.readFailedKey && this.readFailedKey !== launchKey) this.readFailedKey = '';
     const remedy = (err) => {
+        if (err.code === 'SERVER_FAILED' && this.readWhole) {
+          // Uma's own choice of how the file is loaded must never keep a model from loading.
+          this.log('[uma] the load failed with the model file read whole; loading again memory-mapped');
+          this.readFailedKey = launchKey;
+          return this.startWithHelpers(model, runtimeConfig, launchKey).catch(remedy);
+        }
         if (err.code === 'SERVER_FAILED' && this.batchTune && this.batchTune.size > 512) {
           // A larger batch needs more GPU memory: this size is not tried again for this model.
           this.batchTuner.fail(this.batchTune.key, this.batchTune.size);
@@ -512,9 +526,11 @@ class LlamaManager {
     const found = await this.localGpus(runtimeConfig, settings);
     // Cards chosen for this model in its settings (or by "Optimize and benchmark"): a model that
     // fits on one card is faster there than shared between several (9B Q8: 35 tok/s on an RTX 3060
-    // alone, 22 shared with two Tesla P40). Names the engine no longer lists are ignored.
-    const wanted = String(settings.gpuCards || '').split(',').map((name) => name.trim()).filter(Boolean);
-    const picked = found.used.filter((device) => wanted.includes(device.name));
+    // alone, 22 shared with two Tesla P40). A choice that cannot be met is ignored (see chosenCards).
+    const picked = chosenCards(found.used, settings.gpuCards);
+    if (settings.gpuCards && found.used.length > 1 && !picked.length) this.log(`[uma] the cards chosen for this model (${settings.gpuCards}) are not all in this PC any more; every card is used`);
+    // How several cards share the model, for the panel on the right: "layer" unless chosen otherwise.
+    this.splitMode = settings.splitMode && settings.splitMode !== 'auto' ? settings.splitMode : 'layer';
     this.cards = picked.length && picked.length < found.used.length
       ? { used: picked, missing: found.missing, all: found.used, chosen: true }
       : { ...found, all: found.used };
@@ -565,16 +581,33 @@ class LlamaManager {
       : null;
     for (const note of fixes.notes) this.log(`[uma] ${note}`);
     this.cacheFix = fixes.changed;
+    // One card holds the whole model (the only one usable, or the one chosen): there is nothing to
+    // share, so no way of sharing is passed on, whatever the model's settings still say.
+    if (this.cards.used.length === 1 && !this.helpers.servers.length && settings.splitMode && settings.splitMode !== 'auto') settings = { ...settings, splitMode: 'auto' };
     // Guessing ahead without a second model, when the engine knows how. A draft model chosen by
     // the user comes first, and so does a --spec-type written in the extra arguments. The MTP head
     // is left out with helper PCs: untested over the network.
     this.speculation = null;
+    // What this engine build knows, from its own help text (asked once for each engine).
+    if (!this.specSupport.has(runtimeConfig.serverPath)) {
+      this.specSupport.set(runtimeConfig.serverPath, speculationSupport(await this.engineHelp(runtimeConfig.serverPath).catch(() => '')));
+    }
+    const support = this.specSupport.get(runtimeConfig.serverPath);
+    // Every layer goes to this PC's graphics cards: on Windows the model file is then read, not
+    // memory-mapped. A mapped file's pages stay in RAM after their contents were copied to the
+    // cards (llama.cpp can give them back only on Linux and macOS). Measured with a 30 GB model
+    // on a PC with 40 GB of RAM: mapped, the engine held 30.7 GB and the PC had 5.4 GB left, Windows
+    // began to page, and replies waited up to 45 s; read, it held 4.5 GB and the PC had 31.6 GB
+    // left, the load took 17 s instead of 14, and it wrote and read as fast. A loading mode chosen
+    // in the model's settings is left alone, and a load that fails this way is tried again mapped.
+    const onCardsOnly = !this.helpers.servers.length && !this.moeCache && settings.gpuLayers === undefined
+      && settings.gpuOffload !== false && runtimeConfig.backend !== 'cpu' && (allLayers || (several && this.placement?.mode === 'balanced'));
+    this.readWhole = this.platform === 'win32' && support.loadMode && onCardsOnly && (settings.loadMode ?? 'auto') === 'auto' && launchKey !== this.readFailedKey;
+    if (this.readWhole) this.log('[uma] every layer goes to the graphics cards, so the model file is read, not memory-mapped: it does not stay in RAM as well');
+    // The engine's own prompt cache in RAM, kept to a tenth of this PC's RAM (see promptCacheLimit).
+    const promptCacheMB = support.cacheRam ? promptCacheLimit(this.totalRam() / MiB) : 0;
     const specByHand = parseExtraArgs(settings.extraArgs).some((arg) => arg.split('=')[0] === '--spec-type');
     if (!this.draft && !specByHand && launchKey !== this.specFailedKey && (settings.mtp !== 'off' || settings.ngram !== 'off')) {
-      if (!this.specSupport.has(runtimeConfig.serverPath)) {
-        this.specSupport.set(runtimeConfig.serverPath, speculationSupport(await this.engineHelp(runtimeConfig.serverPath).catch(() => '')));
-      }
-      const support = this.specSupport.get(runtimeConfig.serverPath);
       const mtp = settings.mtp !== 'off' && support.mtp && info?.mtpLayers > 0 && !this.helpers.servers.length;
       const ngram = settings.ngram !== 'off' && support.ngram;
       if (mtp || ngram) {
@@ -588,7 +621,7 @@ class LlamaManager {
       // --rpc first: llama-server reads arguments in order, and -dev can only name RPC devices once
       // --rpc has registered them.
       ...(this.helpers.servers.length ? ['--rpc', this.helpers.servers.join(',')] : []),
-      ...buildServerArgs(model.path, settings, runtimeConfig.backend, { allLayers, mmproj: model.mmproj?.path, placement: placementArgs(this.placement), extraFitMB: this.draft?.memoryMB || 0, moeCache: this.moeCache }),
+      ...buildServerArgs(model.path, settings, runtimeConfig.backend, { allLayers, mmproj: model.mmproj?.path, placement: placementArgs(this.placement), extraFitMB: this.draft?.memoryMB || 0, moeCache: this.moeCache, readWhole: this.readWhole, promptCacheMB }),
       ...(this.draft ? draftArgs({ path: this.draft.path, tokens: this.draft.tokens, device: this.placement?.draftDevice || '' }) : speculationArgs(this.speculation || {})),
       // One card chosen of several: without -dev the engine would use every card it lists.
       ...(this.cards.chosen && !several && !this.helpers.servers.length ? ['-dev', this.cards.used[0].name] : []),
@@ -875,7 +908,57 @@ class LlamaManager {
     this.broadcast();
   }
 
+  /** Whether this chat's memory is on disk for the model as it is loaded now (it is then read back, not read again). */
+  async hasMemoryOf(conversationId) {
+    if (!conversationId || !this.promptCache || !this.chatMemory) return false;
+    return Boolean(await this.chatMemory.find(conversationId, this.promptCache.key).catch(() => null));
+  }
+
+  /** True for an engine that has read nothing since it was loaded and is doing nothing now. */
+  canWarm() {
+    const cache = this.promptCache;
+    return this.state === 'ready' && Boolean(this.port) && this.active === 0 && !this.warming
+      && this.warmedGeneration !== this.generation && !(cache && (cache.owner || cache.dirty));
+  }
+
+  /**
+   * Reads the start of a prompt (Uma's instructions) before the first message is sent, so that
+   * message does not wait for it: the engine keeps what it has read and reuses it for the next
+   * request that begins the same way. Measured with b12428 on two Tesla P40: 3,701 tokens took
+   * 14.3 s to read once; the next request with the same instructions and another question read 25
+   * tokens in 0.6 s. Only into an engine that holds no chat (see canWarm), once per load; a
+   * request that arrives meanwhile waits for it to finish, as the engine would make it wait anyway.
+   */
+  warm(messages) {
+    if (!this.canWarm()) return Promise.resolve(false);
+    this.warmedGeneration = this.generation;
+    const port = this.port;
+    this.active += 1;
+    const started = Date.now();
+    this.warming = fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${this.apiKey}` },
+      signal: AbortSignal.timeout(300000),
+      body: JSON.stringify({ messages, stream: false, temperature: 0, max_tokens: 1, cache_prompt: true, chat_template_kwargs: { enable_thinking: false } }),
+    }).then(async (response) => {
+      if (!response.ok) throw new Error(`${response.status} ${(await response.text().catch(() => '')).slice(0, 200)}`);
+      const data = await response.json();
+      this.log(`[uma] read the instructions ahead of the first message: ${data.timings?.prompt_n ?? '?'} tokens in ${((Date.now() - started) / 1000).toFixed(1)} s`);
+      return true;
+    }).catch((err) => {
+      this.log(`[uma] the instructions were not read ahead: ${err.message}`);
+      return false;
+    }).finally(() => {
+      this.active -= 1;
+      this.warming = null;
+      // Reading ahead counts as use: the idle time starts again (not for an engine that was stopped meanwhile).
+      if (this.state === 'ready') this.touch();
+    });
+    return this.warming;
+  }
+
   async complete(options) {
+    if (this.warming) await this.warming;
     await this.useConversation(options.conversationId || null);
     this.active += 1;
     try {
@@ -944,6 +1027,9 @@ class LlamaManager {
   async *streamChat({ messages, signal, temperature = 0.35, topP = 0.9, maxTokens = 2048, responseSchema, sampling = {}, conversationId = null }) {
     if (this.state !== 'ready' || !this.port) throw new Error(t('The model server is not ready.'));
     this.touch();
+    // The instructions being read ahead (see warm) are read once, not twice: wait for them.
+    if (this.warming) await Promise.race([this.warming, new Promise((resolve) => { signal?.addEventListener('abort', resolve, { once: true }); })]);
+    if (this.state !== 'ready' || !this.port) throw new Error(t('The model server is not ready.'));
     await this.useConversation(conversationId);
     this.active += 1;
     clearTimeout(this.promptSaveTimer);

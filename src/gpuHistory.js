@@ -25,6 +25,8 @@ export function recordGpuSample(stats, at = Date.now()) {
         percent: Math.max(0, Math.min(100, Number(card.percent) || 0)),
         usedBytes: Number(card.usedBytes) || 0,
         totalBytes: Number(card.totalBytes) || 0,
+        // Only for a card in a slot with fewer PCIe lanes than it can use.
+        ...(card.lanes ? { lanes: card.lanes, lanesMax: card.lanesMax } : {}),
       })),
     };
     history = [...(same ? history : []), sample].slice(-HISTORY_LENGTH);

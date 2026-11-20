@@ -128,20 +128,28 @@ function ResultPanel({ result, onRun, onOptimize }) {
         </div>
       </div>
 
-      {result.optimization && (
-        <div className="bench-detail-card bench-optimization">
-          <SectionLabel>{t('Optimization')}</SectionLabel>
-          <p>{result.optimization.changed
-            ? t('Fastest: {0}. It is saved in this model’s settings.', [result.optimization.chosen])
-            : t('The settings this model already had were the fastest, so nothing was changed.')}</p>
-          {result.optimization.tried.map((entry, index) => (
-            <div className={`bench-kv ${entry.chosen ? 'is-chosen' : ''}`} key={index}>
-              <span>{entry.chosen && <Check size={12} />}{entry.chosen && ' '}{entry.label}</span>
-              <strong>{entry.failed || !entry.tokensPerSecond ? t('did not load') : `${number(entry.tokensPerSecond)} ${t('tok/s')}`}</strong>
-            </div>
-          ))}
-        </div>
-      )}
+      {result.optimization && (() => {
+        // Runs saved by 0.2.91 and 0.2.92 name one chosen step and one speed for each.
+        const kept = result.optimization.kept || (result.optimization.changed && result.optimization.chosen ? [result.optimization.chosen] : []);
+        return (
+          <div className="bench-detail-card bench-optimization">
+            <SectionLabel>{t('Optimization')}</SectionLabel>
+            <p>{result.optimization.changed && kept.length
+              ? t('Kept: {0}. Saved in this model’s settings.', [kept.join(' · ')])
+              : t('The settings this model already had were the fastest, so nothing was changed.')}</p>
+            {result.optimization.tried.map((entry, index) => {
+              const write = entry.write ?? entry.tokensPerSecond;
+              const isKept = entry.kept ?? entry.chosen;
+              return (
+                <div className={`bench-kv ${isKept ? 'is-chosen' : ''}`} key={index} title={entry.prose && entry.code ? t('Prose {0} tok/s · code {1} tok/s', [number(entry.prose), number(entry.code)]) : undefined}>
+                  <span>{isKept && <Check size={12} />}{isKept && ' '}{entry.label}</span>
+                  <strong>{entry.failed || !write ? t('did not load') : `${number(write)} ${t('tok/s')}${entry.read ? ` · ${t('reads {0}', [entry.read])}` : ''}`}</strong>
+                </div>
+              );
+            })}
+          </div>
+        );
+      })()}
 
       <div className="bench-result-foot">
         <span><Check size={13} />{' '}{t('Measured locally · no cloud round trip')}</span>
@@ -204,7 +212,7 @@ export default function BenchmarkView({ boot, progress, history = [], onRun, onO
                   icon={Zap}
                   onClick={onOptimize}
                   disabled={!canRun}
-                  title={t('Loads the model several times with different settings (graphics cards used, how they share the model, GPU layers, CPU threads), keeps the fastest in the model’s settings, then runs the benchmark. It takes a few minutes with a large model.')}
+                  title={t('Loads the model several times, each time with one thing changed (graphics cards used and how they share the model, GPU layers, CPU threads, guessing ahead, a larger context), keeps what is clearly faster in the model’s settings, then runs the benchmark. It takes a few minutes with a large model.')}
                 >
                   {t('Optimize and benchmark')}
                 </Button>

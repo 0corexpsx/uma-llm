@@ -344,6 +344,18 @@ export default function SettingsView({ boot, onRefreshBoot, showToast }) {
             </SettingRow>
             <SettingRow
               icon={Zap}
+              title={t('Get ready while I type')}
+              description={t('When you start to write a message, Uma loads the model if it is asleep and has it read Uma’s instructions meanwhile, so the first word of the reply comes sooner (about half a minute sooner with a large model that had gone idle). Turn it off if writing a message should not use the graphics cards yet.')}
+            >
+              <Toggle
+                checked={settings.loadOnTyping !== false}
+                onChange={(value) => update({ loadOnTyping: value }, 'loadtyping')}
+                disabled={busy === 'loadtyping'}
+                label={t('Get ready while I type')}
+              />
+            </SettingRow>
+            <SettingRow
+              icon={Zap}
               title={t('GPU offload')}
               description={t('Offload model layers to {0}. Turn off to force CPU inference.', [boot.hardware?.gpu || t('the GPU')])}
             >

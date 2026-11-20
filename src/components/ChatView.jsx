@@ -441,6 +441,14 @@ export default function ChatView({
   const hiddenMessages = Math.max(0, messages.length - visibleMessages.length);
   const canChat = !missingModel && !missingRuntime && !busyOther;
 
+  // The first character of a message: Uma gets the model ready while the rest is written (it loads
+  // if it is asleep, and the engine reads the instructions). Asked once per message; Uma itself
+  // decides whether there is anything to do.
+  const typing = Boolean(value.trim());
+  useEffect(() => {
+    if (typing && canChat && !generating && settings?.loadOnTyping !== false) api.warmChat?.(conversation?.id || null)?.catch(() => {});
+  }, [typing, conversation?.id]);
+
   const scrollToBottom = (smooth = false) => {
     const node = scrollRef.current;
     if (!node) return;

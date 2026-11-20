@@ -140,6 +140,7 @@ contextBridge.exposeInMainWorld('uma', {
   importVision: (id) => invoke('models:vision-import', id),
   removeVision: (id) => invoke('models:vision-remove', id),
   stopChat: (conversationId) => invoke('chat:stop', conversationId),
+  warmChat: (conversationId) => invoke('chat:warm', conversationId),
   undoToolChange: (conversationId, messageId, blockId) => invoke('chat:undo', { conversationId, messageId, blockId }),
 
   onChatEvent: (callback) => subscribe('chat:event', callback),

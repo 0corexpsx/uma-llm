@@ -1,4 +1,4 @@
-THIRD-PARTY NOTICES FOR UMA LLM 0.2.92
+THIRD-PARTY NOTICES FOR UMA LLM 0.2.93
 
 Uma LLM is made by Ocorex and is free software under the GNU GPL v3 (LICENSE.txt). It is built
 with, and downloads, open-source software made by others. Each of those parts
